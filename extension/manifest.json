@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "OBA — Open Browser Agent",
+  "version": "0.1.0",
+  "description": "Permite que qualquer agente de IA (via MCP) controle o navegador.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnWZmVcLYhgF+LO4M71dOoXtYXMySps3baaAdyW6kd2BLnNYN05N7j6/EKm3Nc+3z4k8TjDmkt/oUKjmak3XELbtu7DMm85UU4WRx1CU4Qq54WluxkZchEY7qh1Frc3Bp7PGmyKDm2eUh81Kww7C3JkxNvs1AolvncyenPQ59licnSv5aVA2bCC7pqhYPbnaQsF2F05ez8r65z2KTUq9IfEGSNurVroY97Y9dytIXYxoSIi2d31Vwth1KIe3kW4q7I5+eaT9YDu3hHHf+uvfNMKUgfQaXaY/E/Ch84ykBB2mSn2PPerPmLzZjzmWifS2QLGCgG6QSqA04vfYkmzLoLQIDAQAB",
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "OBA" },
+  "permissions": ["nativeMessaging", "tabs", "tabGroups", "debugger", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"]
+}
