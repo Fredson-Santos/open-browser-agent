@@ -26,6 +26,10 @@
     .tag.allow { color: var(--ok); }
     .tag.block { color: var(--danger); }
     .policy { display: block; margin-bottom: 10px; }
+    .toggle { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border);
+      border-radius: var(--radius); cursor: pointer; }
+    .toggle input { margin-top: 3px; accent-color: var(--accent); width: 16px; height: 16px; flex: none; }
+    .toggle small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
     .log li { align-items: flex-start; font-size: 13px; }
     .log .dot { margin-top: 6px; }
     .log .when { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
@@ -63,6 +67,17 @@
       </select>
     </label>
     <div id="sites"></div>
+  </section>
+
+  <section>
+    <h2>Avançado</h2>
+    <label class="toggle">
+      <input type="checkbox" id="allow-js">
+      <span>
+        Permitir que agentes executem JavaScript
+        <small>Dá acesso total à página (cookies, dados, ações). Deixe desligado se não precisar.</small>
+      </span>
+    </label>
   </section>
 
   <section>

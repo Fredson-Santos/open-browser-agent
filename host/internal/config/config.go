@@ -17,7 +17,7 @@ const (
 	HostName = "com.oba.browser"
 	// ExtensionID é derivado da chave pública fixada em extension/manifest.json.
 	ExtensionID = "pfikhdcedpalmkfjbkldnfdiohhfomml"
-	Version     = "0.4.0"
+	Version     = "0.5.0"
 )
 
 // Dir retorna o diretório de dados do OBA (%APPDATA%\oba no Windows).

@@ -20,14 +20,15 @@ export const K = {
 
 export type ClientGrant = { approvedAt: number };
 export type SiteRule = "allow" | "block";
-export type Settings = { sitePolicy: "ask" | "allow_all" };
-export const DEFAULT_SETTINGS: Settings = { sitePolicy: "ask" };
+export type Settings = { sitePolicy: "ask" | "allow_all"; allowJavascript?: boolean };
+export const DEFAULT_SETTINGS: Settings = { sitePolicy: "ask", allowJavascript: false };
 
 export type Prompt = {
   id: string;
-  kind: "client" | "site";
+  kind: "client" | "site" | "upload";
   client: string;
   domain?: string;
+  files?: string[];
   created: number;
 };
 

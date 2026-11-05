@@ -115,4 +115,88 @@ var Tools = []Tool{
 			"duration":         map[string]any{"type": "number", "description": "Segundos para wait (máx. 30)."},
 		}, "tab_id", "action"),
 	},
+	{
+		Name: "form_input",
+		Description: "Define o valor de um campo de formulário pelo ref, disparando os eventos que frameworks " +
+			"(React, Vue) esperam. Use para <select> (pelo texto ou value da opção; read_page lista as opções), " +
+			"checkbox/radio (true/false), campos de texto, data, número e áreas editáveis. " +
+			"Mais confiável que clicar em menus nativos, que não aparecem no screenshot.",
+		InputSchema: obj(map[string]any{
+			"tab_id": tabID,
+			"ref":    map[string]any{"type": "string", "description": "Ref do campo."},
+			"value": map[string]any{
+				"description": "Texto, número, booleano (checkbox) ou lista de opções (select múltiplo).",
+				"anyOf": []any{
+					map[string]any{"type": "string"}, map[string]any{"type": "number"}, map[string]any{"type": "boolean"},
+					map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				},
+			},
+		}, "tab_id", "ref", "value"),
+	},
+	{
+		Name: "handle_dialog",
+		Description: "Responde a um diálogo nativo (alert, confirm, prompt) que bloqueia a página. " +
+			"Quando uma ação abre um diálogo, as outras ferramentas avisam e esperam por esta.",
+		InputSchema: obj(map[string]any{
+			"tab_id":      tabID,
+			"accept":      map[string]any{"type": "boolean", "description": "true = OK/Aceitar (padrão), false = Cancelar."},
+			"prompt_text": map[string]any{"type": "string", "description": "Texto para um prompt()."},
+		}, "tab_id"),
+	},
+	{
+		Name: "read_console",
+		Description: "Lê as mensagens de console da aba (log, warn, error, exceções não tratadas, avisos do navegador). " +
+			"A captura começa quando o agente abre ou navega a aba.",
+		InputSchema: obj(map[string]any{
+			"tab_id":      tabID,
+			"only_errors": map[string]any{"type": "boolean", "description": "Só erros e exceções."},
+			"pattern":     map[string]any{"type": "string", "description": "Regex para filtrar texto ou URL."},
+			"limit":       map[string]any{"type": "integer", "description": "Máximo de mensagens (padrão 100, as mais recentes)."},
+			"clear":       map[string]any{"type": "boolean", "description": "Limpa o buffer depois de ler."},
+		}, "tab_id"),
+	},
+	{
+		Name: "read_network",
+		Description: "Lista as requisições HTTP da aba (XHR/fetch/documentos; imagens/fontes/CSS só com include_static) " +
+			"com método, status, tipo e tamanho. Com request_id, retorna o corpo da resposta.",
+		InputSchema: obj(map[string]any{
+			"tab_id":         tabID,
+			"url_pattern":    map[string]any{"type": "string", "description": "Filtra URLs que contêm este texto."},
+			"only_errors":    map[string]any{"type": "boolean", "description": "Só falhas e status >= 400."},
+			"include_static": map[string]any{"type": "boolean", "description": "Inclui imagens, fontes, CSS e mídia."},
+			"limit":          map[string]any{"type": "integer", "description": "Máximo de requisições (padrão 50, as mais recentes)."},
+			"request_id":     map[string]any{"type": "string", "description": "Lê o corpo da resposta desta requisição."},
+			"clear":          map[string]any{"type": "boolean", "description": "Limpa o buffer depois de ler."},
+		}, "tab_id"),
+	},
+	{
+		Name: "file_upload",
+		Description: "Anexa arquivos locais a um campo <input type=\"file\"> (ou ao botão/rótulo que o contém). " +
+			"Não clique no botão de upload: isso abre o seletor do sistema. O usuário confirma cada envio.",
+		InputSchema: obj(map[string]any{
+			"tab_id": tabID,
+			"ref":    map[string]any{"type": "string", "description": "Ref do campo de arquivo ou do botão de upload."},
+			"paths":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Caminhos absolutos dos arquivos."},
+		}, "tab_id", "ref", "paths"),
+	},
+	{
+		Name: "gif_creator",
+		Description: "Grava as ações do agente na aba como GIF: start, faça as ações, stop (opcional) e export. " +
+			"Cada clique, digitação, navegação ou scroll vira um quadro, com o ponto do clique destacado. " +
+			"O arquivo vai para Downloads/oba.",
+		InputSchema: obj(map[string]any{
+			"tab_id":   tabID,
+			"action":   map[string]any{"type": "string", "enum": []string{"start", "stop", "export", "clear"}},
+			"filename": map[string]any{"type": "string", "description": "Nome do arquivo no export (opcional)."},
+		}, "tab_id", "action"),
+	},
+	{
+		Name: "javascript",
+		Description: "Executa JavaScript no contexto da página (corpo de função async; use return para devolver um valor). " +
+			"Desativado por padrão: o usuário precisa ativar no painel do OBA. Prefira as outras ferramentas.",
+		InputSchema: obj(map[string]any{
+			"tab_id": tabID,
+			"code":   map[string]any{"type": "string", "description": "Ex.: return document.querySelectorAll('tr').length"},
+		}, "tab_id", "code"),
+	},
 }

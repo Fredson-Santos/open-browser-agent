@@ -171,6 +171,8 @@ function textOf(root: Element, limit = 300): string {
         const e = c as Element;
         const tag = e.tagName.toLowerCase();
         if (SKIP_TAGS.has(tag) || e.getAttribute("aria-hidden") === "true") continue;
+        // <label>Plano <select>…</select></label>: o nome é "Plano", sem as opções.
+        if (FORM_CONTROLS.has(tag) || tag === "option" || tag === "datalist") continue;
         if (tag === "br") {
           out += " ";
           continue;
@@ -268,6 +270,9 @@ function extrasOf(el: Element, role: string | null): string {
     const s = el as HTMLSelectElement;
     const opt = s.options[s.selectedIndex];
     if (opt) parts.push(`value="${clean(opt.textContent, 80)}"`);
+    // O menu nativo não aparece em screenshots: lista as opções aqui (use form_input).
+    const opts = Array.from(s.options).map((o) => clean(o.textContent, 30)).filter(Boolean);
+    if (opts.length) parts.push(`options=[${opts.slice(0, 20).join(" | ")}${opts.length > 20 ? ` | …+${opts.length - 20}` : ""}]`);
   } else if ((el as HTMLElement).isContentEditable && role === "textbox") {
     const t = clean(el.textContent, 80);
     if (t) parts.push(`value="${t}"`);
@@ -539,6 +544,93 @@ function viewport() {
   return { width: innerWidth, height: innerHeight, dpr: devicePixelRatio, scrollX: Math.round(scrollX), scrollY: Math.round(scrollY) };
 }
 
-(window as unknown as { __oba: unknown }).__oba = { readPage, find, pageText, resolveRef, viewport };
+// ---------------------------------------------------------------- formulários
+
+/** Define value pelo setter nativo e dispara input/change (funciona com React/Vue). */
+function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string): void {
+  const win = (el.ownerDocument.defaultView ?? window) as unknown as Record<string, { prototype: object }>;
+  const ctor = el.tagName === "TEXTAREA" ? "HTMLTextAreaElement" : el.tagName === "SELECT" ? "HTMLSelectElement" : "HTMLInputElement";
+  const setter = Object.getOwnPropertyDescriptor(win[ctor].prototype, "value")?.set;
+  if (setter) setter.call(el, value);
+  else el.value = value;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+const truthy = (v: unknown) => v === true || /^(true|1|sim|yes|on|marcado|checked)$/i.test(String(v).trim());
+
+function formInput(refId: string, value: unknown): string {
+  const el = getRef(refId);
+  const tag = el.tagName.toLowerCase();
+  (el as HTMLElement).focus?.();
+
+  if (tag === "select") {
+    const s = el as HTMLSelectElement;
+    const raw = (Array.isArray(value) ? value : [value]).map((v) => String(v).trim());
+    const wanted = raw.map(norm);
+    const match = (o: HTMLOptionElement, w: string) => norm(o.value) === w || norm(clean(o.textContent)) === w;
+    const fuzzy = (o: HTMLOptionElement, w: string) => norm(clean(o.textContent)).includes(w);
+    const options = Array.from(s.options);
+    const picked = wanted.map((w) => options.find((o) => match(o, w)) ?? options.find((o) => fuzzy(o, w)));
+    const missing = raw.filter((_, i) => !picked[i]);
+    if (missing.length) {
+      throw new Error(`opção não encontrada: ${missing.join(", ")}. Opções: ${options.map((o) => clean(o.textContent, 30)).join(" | ")}`);
+    }
+    if (s.multiple) {
+      for (const o of options) o.selected = picked.includes(o);
+      s.dispatchEvent(new Event("input", { bubbles: true }));
+      s.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      setNativeValue(s, picked[0]!.value);
+    }
+    return `${refId} (select) agora: ${Array.from(s.selectedOptions).map((o) => `"${clean(o.textContent)}"`).join(", ")}`;
+  }
+
+  if (tag === "input") {
+    const input = el as HTMLInputElement;
+    if (input.type === "checkbox" || input.type === "radio") {
+      const want = truthy(value);
+      if (input.checked !== want) {
+        if (input.type === "radio" && !want) throw new Error("não dá para desmarcar um radio; marque outra opção do grupo.");
+        input.click(); // dispara os eventos que frameworks esperam
+      }
+      return `${refId} (${input.type}) agora: ${input.checked ? "marcado" : "desmarcado"}`;
+    }
+    if (input.type === "file") throw new Error("para campos de arquivo use file_upload.");
+    setNativeValue(input, String(value ?? ""));
+    return `${refId} agora: ${isSensitive(input) ? "[value redacted]" : `"${clean(input.value, 80)}"`}`;
+  }
+
+  if (tag === "textarea") {
+    setNativeValue(el as HTMLTextAreaElement, String(value ?? ""));
+    return `${refId} (textarea) agora tem ${(el as HTMLTextAreaElement).value.length} caractere(s)`;
+  }
+
+  if ((el as HTMLElement).isContentEditable) {
+    el.textContent = String(value ?? "");
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    return `${refId} (editável) atualizado`;
+  }
+
+  throw new Error(`${refId} (${roleOf(el) ?? tag}) não é um campo de formulário; use computer (clique/digitação).`);
+}
+
+/** Marca o <input type=file> do ref para o CDP encontrá-lo no mundo principal. */
+function markUpload(refId: string): { token: string; multiple: boolean; accept: string } {
+  let el: Element | null = getRef(refId);
+  const isFile = (e: Element | null) => !!e && e.tagName.toLowerCase() === "input" && (e as HTMLInputElement).type === "file";
+  if (!isFile(el)) {
+    // Botões/rótulos "Enviar arquivo" costumam envolver ou apontar para o input real.
+    const viaLabel = (el as HTMLLabelElement).control ?? null;
+    el = isFile(viaLabel) ? viaLabel : el!.querySelector('input[type="file"]') ?? el!.parentElement?.querySelector('input[type="file"]') ?? null;
+  }
+  if (!el || !isFile(el)) throw new Error(`${refId} não é (nem contém) um campo de arquivo <input type="file">.`);
+  const token = `oba-${Math.random().toString(36).slice(2)}`;
+  el.setAttribute("data-oba-upload", token);
+  const input = el as HTMLInputElement;
+  return { token, multiple: input.multiple, accept: input.accept };
+}
+
+(window as unknown as { __oba: unknown }).__oba = { readPage, find, pageText, resolveRef, viewport, formInput, markUpload };
 
 export {};

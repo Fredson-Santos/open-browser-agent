@@ -1,6 +1,8 @@
 // Chama funções do motor de percepção (content.js) dentro da aba,
 // injetando-o sob demanda na primeira vez.
 
+import * as cdp from "./cdp";
+
 type Reply = { __missing?: true; ok?: unknown; err?: string } | undefined;
 
 async function exec(tabId: number, method: string, args: unknown[]): Promise<Reply> {
@@ -21,6 +23,9 @@ async function exec(tabId: number, method: string, args: unknown[]): Promise<Rep
 }
 
 export async function call<T>(tabId: number, method: string, ...args: unknown[]): Promise<T> {
+  // Com um alert/confirm aberto a página não executa scripts: falha logo, explicando.
+  const dialog = cdp.pendingDialog(tabId);
+  if (dialog) throw cdp.dialogError(dialog);
   let res: Reply;
   try {
     res = await exec(tabId, method, args);

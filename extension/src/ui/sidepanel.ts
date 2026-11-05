@@ -105,6 +105,7 @@ async function renderClients() {
 async function renderSites() {
   const settings = await getLocal<Settings>(K.settings, DEFAULT_SETTINGS);
   ($("policy") as HTMLSelectElement).value = settings.sitePolicy;
+  ($("allow-js") as HTMLInputElement).checked = !!settings.allowJavascript;
   const rules = await getLocal<Record<string, SiteRule>>(K.sites, {});
   const box = $("sites");
   box.replaceChildren();
@@ -170,9 +171,15 @@ async function renderLog() {
   box.append(ul);
 }
 
-$("policy").addEventListener("change", async (e) => {
-  const sitePolicy = (e.target as HTMLSelectElement).value as Settings["sitePolicy"];
-  await chrome.storage.local.set({ [K.settings]: { ...DEFAULT_SETTINGS, sitePolicy } });
+async function updateSettings(patch: Partial<Settings>) {
+  const current = await getLocal<Settings>(K.settings, DEFAULT_SETTINGS);
+  await chrome.storage.local.set({ [K.settings]: { ...DEFAULT_SETTINGS, ...current, ...patch } });
+}
+$("policy").addEventListener("change", (e) => {
+  void updateSettings({ sitePolicy: (e.target as HTMLSelectElement).value as Settings["sitePolicy"] });
+});
+$("allow-js").addEventListener("change", (e) => {
+  void updateSettings({ allowJavascript: (e.target as HTMLInputElement).checked });
 });
 $("reconnect").addEventListener("click", () => chrome.runtime.sendMessage({ type: "OBA_RECONNECT" }));
 

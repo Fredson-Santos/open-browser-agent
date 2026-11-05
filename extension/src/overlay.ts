@@ -25,9 +25,10 @@ async function exec(tabId: number, method: Method, args: unknown[], inject: bool
   return res?.value;
 }
 
+/** Ignora falhas e não espera mais que 1,5s (um alert nativo trava os scripts da página). */
 async function safe<T>(p: Promise<T>): Promise<T | undefined> {
   try {
-    return await p;
+    return await Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), 1500))]);
   } catch {
     return undefined;
   }

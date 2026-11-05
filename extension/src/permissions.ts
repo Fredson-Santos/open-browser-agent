@@ -31,8 +31,8 @@ async function setPending(fn: (p: Record<string, Prompt>) => void) {
   await chrome.storage.session.set({ [K.pending]: pending });
 }
 
-async function ask(kind: Prompt["kind"], client: string, domain?: string): Promise<Decision> {
-  const key = `${kind}|${client}|${domain ?? ""}`;
+async function ask(kind: Prompt["kind"], client: string, domain?: string, files?: string[]): Promise<Decision> {
+  const key = `${kind}|${client}|${domain ?? ""}|${(files ?? []).join("|")}`;
   const existing = inflight.get(key);
   if (existing) return existing;
 
@@ -44,13 +44,13 @@ async function ask(kind: Prompt["kind"], client: string, domain?: string): Promi
   inflight.set(key, promise);
   promise.finally(() => inflight.delete(key));
 
-  await setPending((p) => (p[id] = { id, kind, client, domain, created: Date.now() }));
+  await setPending((p) => (p[id] = { id, kind, client, domain, files, created: Date.now() }));
   try {
     const win = await chrome.windows.create({
       url: chrome.runtime.getURL(`approve.html?id=${id}`),
       type: "popup",
       width: 440,
-      height: 360,
+      height: kind === "upload" ? 420 : 360,
       focused: true,
     });
     if (win?.id !== undefined) windows.set(win.id, id);
@@ -136,5 +136,29 @@ export async function checkSite(session: string, client: string, url: string | u
     rules[site] = "block";
     await chrome.storage.local.set({ [K.sites]: rules });
     throw new Error(`O usuário bloqueou o acesso de agentes a ${site}.`);
+  }
+}
+
+/**
+ * Upload envia arquivos do computador do usuário para um site: sempre pergunta,
+ * mostrando os arquivos e o destino. Não existe "permitir sempre".
+ */
+export async function checkUpload(client: string, url: string | undefined, files: string[]): Promise<void> {
+  const site = siteOf(url) ?? url ?? "esta página";
+  const d = await ask("upload", client, site, files);
+  if (d === "session" || d === "always") return;
+  if (d === "timeout") throw new Error(NO_ANSWER);
+  if (d === "dismissed") throw new Error(DISMISSED);
+  throw new Error("O usuário recusou o envio dos arquivos.");
+}
+
+/** javascript_tool só funciona se o usuário ativar no side panel. */
+export async function checkJavascript(): Promise<void> {
+  const settings = await getLocal<Settings>(K.settings, DEFAULT_SETTINGS);
+  if (!settings.allowJavascript) {
+    throw new Error(
+      "A execução de JavaScript arbitrário está desativada. O usuário pode ativá-la no painel do OBA " +
+        "(\"Permitir que agentes executem JavaScript\"). Prefira read_page, find, computer e form_input.",
+    );
   }
 }

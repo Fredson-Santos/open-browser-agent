@@ -2,6 +2,7 @@
 // devolve um CallToolResult do MCP.
 
 import * as cdp from "./cdp";
+import * as gif from "./gif";
 import * as input from "./input";
 import * as overlay from "./overlay";
 import * as page from "./page";
@@ -88,6 +89,8 @@ function bytesToB64(bytes: Uint8Array): string {
 async function capture(tab: chrome.tabs.Tab, format: "jpeg" | "png") {
   const tabId = tab.id!;
   if (cdp.isRestricted(tab.url)) throw new Error(`o navegador não permite capturar ${tab.url}.`);
+  const dialog = cdp.pendingDialog(tabId);
+  if (dialog) throw cdp.dialogError(dialog);
   await activate(tab);
   const { data } = await overlay.hiddenDuring(tabId, () =>
     cdp.send<{ data: string }>(tabId, "Page.captureScreenshot", {
@@ -159,6 +162,9 @@ function modifiers(v: unknown): number {
   return v.split("+").reduce((acc, m) => acc | (MOD_BITS[m.trim().toLowerCase()] ?? 0), 0);
 }
 
+// Último ponto de clique por aba (desenhado nos quadros do GIF).
+const lastPoint = new Map<number, { x: number; y: number }>();
+
 async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
   const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
   const tabId = tab.id!;
@@ -166,8 +172,31 @@ async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
   if (action !== "wait" && cdp.isRestricted(tab.url)) {
     throw new Error(`o navegador não permite automatizar ${tab.url}.`);
   }
+  const open = cdp.pendingDialog(tabId);
+  if (open && action !== "wait") throw cdp.dialogError(open);
   if (action !== "wait") await activate(tab);
 
+  // Um clique que abre alert/confirm deixa o comando CDP pendurado até alguém
+  // responder ao diálogo: corre contra o evento de abertura e devolve na hora.
+  const watcher = cdp.waitDialog(tabId);
+  try {
+    const raced = await Promise.race([
+      computerAction(tab, action, args),
+      watcher.promise.then((d) => ({ dialog: d })),
+    ]);
+    if ("dialog" in raced) {
+      const d = raced.dialog;
+      return text(`${action} executado. A página abriu um diálogo ${d.type}: "${d.message}". ` +
+        `Ela fica bloqueada até você responder com handle_dialog (accept=true/false${d.type === "prompt" ? ", prompt_text" : ""}).`);
+    }
+    return raced;
+  } finally {
+    watcher.cancel();
+  }
+}
+
+async function computerAction(tab: chrome.tabs.Tab, action: string, args: Args): Promise<ToolResult> {
+  const tabId = tab.id!;
   switch (action) {
     case "screenshot":
       return screenshotResult(tab, "jpeg");
@@ -180,12 +209,14 @@ async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
       const t = await target(tabId, args);
       const button: input.Button = action === "right_click" ? "right" : action === "middle_click" ? "middle" : "left";
       const count = action === "double_click" ? 2 : action === "triple_click" ? 3 : 1;
+      lastPoint.set(tabId, t);
       await overlay.pointAt(tabId, t.x, t.y, () => input.click(tabId, t.x, t.y, button, count, modifiers(args.modifiers)));
       return text(`${action} em (${t.x}, ${t.y})${t.note}`);
     }
 
     case "hover": {
       const t = await target(tabId, args);
+      lastPoint.set(tabId, t);
       await overlay.pointAt(tabId, t.x, t.y, () => input.move(tabId, t.x, t.y), false);
       return text(`Mouse sobre (${t.x}, ${t.y})${t.note}`);
     }
@@ -204,6 +235,7 @@ async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
       let where = "no elemento focado";
       if (args.ref || args.coordinate) {
         const t = await target(tabId, args);
+        lastPoint.set(tabId, t);
         await overlay.pointAt(tabId, t.x, t.y, () => input.click(tabId, t.x, t.y));
         where = `em (${t.x}, ${t.y})${t.note}`;
       }
@@ -266,6 +298,7 @@ const handlers: Record<string, Handler> = {
     const url = typeof args.url === "string" && args.url ? normalizeUrl(args.url) : undefined;
     // Cria vazia e só então navega, para o listener de carregamento já estar ativo.
     const tab = await sessions.createTab(ctx.session, ctx.client);
+    await cdp.track(tab.id!); // console/rede desde o primeiro carregamento
     if (url) {
       const { done } = waitForLoad(tab.id!);
       await chrome.tabs.update(tab.id!, { url });
@@ -286,6 +319,7 @@ const handlers: Record<string, Handler> = {
     const tabId = tab.id!;
     const dest = String(args.url ?? "").trim();
     if (!dest) throw new Error("url é obrigatória.");
+    if (!cdp.isRestricted(tab.url)) await cdp.track(tabId);
 
     const { done } = waitForLoad(tabId);
     switch (dest.toLowerCase()) {
@@ -335,6 +369,155 @@ const handlers: Record<string, Handler> = {
   },
 
   computer,
+
+  async form_input(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    if (typeof args.ref !== "string") throw new Error("ref é obrigatório (de read_page/find).");
+    if (args.value === undefined) throw new Error("value é obrigatório.");
+    return text(await page.call<string>(tab.id!, "formInput", args.ref, args.value));
+  },
+
+  async handle_dialog(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const d = cdp.pendingDialog(tab.id!);
+    if (!d) return text("Não há diálogo aberto nesta aba.");
+    const accept = args.accept !== false;
+    await cdp.send(tab.id!, "Page.handleJavaScriptDialog", {
+      accept,
+      ...(typeof args.prompt_text === "string" ? { promptText: args.prompt_text } : {}),
+    });
+    return text(`Diálogo ${d.type} "${d.message}" ${accept ? "aceito" : "recusado"}.`);
+  },
+
+  async read_console(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    await cdp.track(tabId);
+    let list = cdp.consoleEntries(tabId);
+    if (args.only_errors === true) list = list.filter((e) => e.level === "error" || e.level === "exception");
+    if (typeof args.pattern === "string" && args.pattern) {
+      let re: RegExp;
+      try {
+        re = new RegExp(args.pattern, "i");
+      } catch {
+        throw new Error(`pattern inválido: ${args.pattern}`);
+      }
+      list = list.filter((e) => re.test(e.text) || re.test(e.url ?? ""));
+    }
+    const limit = typeof args.limit === "number" ? args.limit : 100;
+    const shown = list.slice(-limit);
+    if (args.clear === true) cdp.clearConsole(tabId);
+    if (shown.length === 0) {
+      return text("Nenhuma mensagem de console capturada. A captura começa quando o agente abre/navega a aba; recarregue (navigate reload) para pegar as do carregamento.");
+    }
+    const t0 = shown[0].t;
+    const lines = shown.map((e) => `[+${((e.t - t0) / 1000).toFixed(1)}s] ${e.level.toUpperCase()} ${e.text.length > 1000 ? e.text.slice(0, 999) + "…" : e.text}${e.url ? `  (${e.url})` : ""}`);
+    return text(`${shown.length} de ${list.length} mensagem(ns):\n${lines.join("\n")}`);
+  },
+
+  async read_network(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    await cdp.track(tabId);
+    if (typeof args.request_id === "string") {
+      const entry = cdp.networkEntries(tabId).find((e) => e.id === args.request_id);
+      if (!entry) throw new Error(`requisição ${args.request_id} não encontrada.`);
+      const body = await cdp.send<{ body: string; base64Encoded: boolean }>(tabId, "Network.getResponseBody", { requestId: args.request_id })
+        .catch((e) => { throw new Error(`corpo indisponível (${(e as Error).message}); só respostas ainda em memória podem ser lidas.`); });
+      if (body.base64Encoded) return text(`${entry.method} ${entry.url} → ${entry.status} ${entry.mimeType}: corpo binário (${Math.round(body.body.length * 0.75 / 1024)} KB), não exibido.`);
+      const max = 20_000;
+      return text(`${entry.method} ${entry.url} → ${entry.status} ${entry.mimeType}\n\n${body.body.slice(0, max)}${body.body.length > max ? `\n\n(truncado em ${max} caracteres de ${body.body.length})` : ""}`);
+    }
+    let list = cdp.networkEntries(tabId);
+    if (typeof args.url_pattern === "string" && args.url_pattern) list = list.filter((e) => e.url.includes(args.url_pattern as string));
+    if (args.only_errors === true) list = list.filter((e) => e.error || (e.status ?? 0) >= 400);
+    if (args.include_static !== true) list = list.filter((e) => !["Image", "Font", "Stylesheet", "Media"].includes(e.type ?? ""));
+    const limit = typeof args.limit === "number" ? args.limit : 50;
+    const shown = list.slice(-limit);
+    if (args.clear === true) cdp.clearNetwork(tabId);
+    if (shown.length === 0) return text("Nenhuma requisição capturada (com esses filtros). A captura começa quando o agente abre/navega a aba.");
+    const lines = shown.map((e) => {
+      const status = e.error ? `ERRO ${e.error}` : e.status ? `${e.status}` : e.done ? "?" : "pendente";
+      const size = e.size !== undefined ? ` ${Math.max(1, Math.round(e.size / 1024))}KB` : "";
+      const url = e.url.length > 160 ? e.url.slice(0, 159) + "…" : e.url;
+      return `${e.method} ${status} ${e.type ?? ""}${size} ${url}  [id ${e.id}]`;
+    });
+    return text(`${shown.length} de ${list.length} requisição(ões) (use request_id para ler o corpo):\n${lines.join("\n")}`);
+  },
+
+  async file_upload(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    const paths = Array.isArray(args.paths) ? args.paths.map(String).filter(Boolean) : [];
+    if (typeof args.ref !== "string" || paths.length === 0) throw new Error("ref e paths (lista de caminhos absolutos) são obrigatórios.");
+    const mark = await page.call<{ token: string; multiple: boolean }>(tabId, "markUpload", args.ref);
+    if (paths.length > 1 && !mark.multiple) throw new Error("este campo aceita só um arquivo.");
+    await permissions.checkUpload(ctx.client, tab.url, paths);
+    // Localiza o input no mundo principal (inclusive em iframes de mesma origem) pelo atributo marcado.
+    const { result } = await cdp.send<{ result: { objectId?: string } }>(tabId, "Runtime.evaluate", {
+      expression: `(() => { const sel = '[data-oba-upload="${mark.token}"]';
+        const find = (doc) => { const el = doc.querySelector(sel); if (el) return el;
+          for (const f of doc.querySelectorAll("iframe")) { try { const r = find(f.contentDocument); if (r) return r; } catch {} } return null; };
+        return find(document); })()`,
+    });
+    if (!result.objectId) throw new Error("não foi possível localizar o campo de arquivo na página.");
+    try {
+      await cdp.send(tabId, "DOM.setFileInputFiles", { files: paths, objectId: result.objectId });
+    } catch (e) {
+      throw new Error(`falha ao anexar: ${(e as Error).message}. Confira se os caminhos existem e são absolutos.`);
+    }
+    return text(`${paths.length} arquivo(s) anexado(s) em ${args.ref}: ${paths.map((p) => p.split(/[\\/]/).pop()).join(", ")}`);
+  },
+
+  async gif_creator(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    switch (args.action) {
+      case "start": {
+        gif.start(tabId);
+        try {
+          const shot = await capture(tab, "jpeg");
+          gif.addFrame(tabId, shot, "início");
+        } catch {
+          /* página interna: começa no próximo quadro */
+        }
+        return text("Gravando. Cada ação (cliques, digitação, navegação, scroll) vira um quadro. Use action=stop e depois export.");
+      }
+      case "stop":
+        gif.stop(tabId);
+        return text(`Gravação parada com ${gif.frameCount(tabId)} quadro(s). Use action=export para salvar.`);
+      case "export": {
+        gif.stop(tabId);
+        const out = await gif.exportGif(tabId, typeof args.filename === "string" ? args.filename : undefined);
+        return text(`GIF salvo: ${out.path} (${out.frames} quadros, ${out.kb} KB).`);
+      }
+      case "clear":
+        gif.stop(tabId);
+        gif.clear(tabId);
+        return text("Quadros descartados.");
+      default:
+        throw new Error('action deve ser "start", "stop", "export" ou "clear".');
+    }
+  },
+
+  async javascript(ctx, args) {
+    await permissions.checkJavascript();
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    const d = cdp.pendingDialog(tabId);
+    if (d) throw cdp.dialogError(d);
+    const code = String(args.code ?? "");
+    if (!code.trim()) throw new Error("code é obrigatório.");
+    const r = await cdp.send<{ result: { value?: unknown; description?: string; type: string }; exceptionDetails?: { exception?: { description?: string }; text: string } }>(
+      tabId,
+      "Runtime.evaluate",
+      { expression: `(async () => { ${code} })()`, awaitPromise: true, returnByValue: true, timeout: 15_000, userGesture: true },
+    );
+    if (r.exceptionDetails) throw new Error(`exceção: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+    const v = r.result.value;
+    const out = v === undefined ? "(undefined — use return para devolver um valor)" : typeof v === "string" ? v : JSON.stringify(v, null, 2);
+    return text(out.length > 20_000 ? out.slice(0, 20_000) + "\n(truncado)" : out);
+  },
 };
 
 const STOPPED =
@@ -356,7 +539,28 @@ const errorResult = (e: unknown): ToolResult => ({
 });
 
 // Ferramentas que leem ou agem sobre o conteúdo da página atual.
-const PAGE_TOOLS = new Set(["read_page", "find", "get_page_text", "computer", "screenshot"]);
+const PAGE_TOOLS = new Set([
+  "read_page", "find", "get_page_text", "computer", "screenshot", "form_input", "file_upload",
+  "read_console", "read_network", "javascript", "handle_dialog", "gif_creator",
+]);
+
+// Ações que geram um quadro quando o GIF está gravando.
+const GIF_TOOLS = new Set(["computer", "navigate", "form_input", "file_upload", "handle_dialog"]);
+
+async function gifFrame(name: string, args: Args, tabId: number): Promise<void> {
+  if (!gif.isRecording(tabId) || !GIF_TOOLS.has(name)) return;
+  if (name === "computer" && ["screenshot", "wait"].includes(String(args.action))) return;
+  try {
+    await sleep(250); // deixa a página reagir antes do quadro
+    const tab = await chrome.tabs.get(tabId);
+    const shot = await capture(tab, "jpeg");
+    gif.addFrame(tabId, shot, `${name} ${summarize(name, args)}`.trim(), lastPoint.get(tabId));
+  } catch {
+    /* diálogo aberto ou página interna: pula o quadro */
+  } finally {
+    lastPoint.delete(tabId);
+  }
+}
 const HISTORY = new Set(["back", "forward", "reload"]);
 
 /** Checa pareamento do agente e permissão do(s) site(s) envolvidos. */
@@ -427,7 +631,9 @@ async function execute(handler: Handler, name: string, ctx: Ctx, args: Args): Pr
         tabId = undefined; // o handler reporta o erro de aba
       }
     }
-    return await Promise.race([handler(ctx, args), aborted]);
+    const result = await Promise.race([handler(ctx, args), aborted]);
+    if (!result.isError && typeof args.tab_id === "number") await gifFrame(name, args, args.tab_id);
+    return result;
   } catch (e) {
     return errorResult(e);
   } finally {

@@ -32,6 +32,20 @@ async function main() {
     $("always").textContent = "Permitir sempre";
     $("session").textContent = "Só desta vez";
     $("deny").textContent = "Recusar";
+  } else if (prompt.kind === "upload") {
+    $("kicker").textContent = "Envio de arquivos";
+    title.append(el("b", prompt.client), " quer enviar arquivos para ", el("b", prompt.domain ?? "?"));
+    const list = document.createElement("ul");
+    list.className = "files";
+    for (const f of prompt.files ?? []) list.append(el("li", f));
+    $("why").replaceChildren(
+      "Os arquivos abaixo, do seu computador, serão anexados ao formulário da página:",
+      list,
+    );
+    $("always").remove();
+    $("session").textContent = "Enviar";
+    $("session").classList.add("primary");
+    $("deny").textContent = "Recusar";
   } else {
     $("kicker").textContent = "Acesso a site";
     title.append(el("b", prompt.client), " quer acessar ", el("b", prompt.domain ?? "?"));
@@ -48,7 +62,7 @@ async function main() {
     for (const b of document.querySelectorAll("button")) b.disabled = true;
     chrome.runtime.sendMessage({ type: "OBA_DECIDE", id, decision }).finally(() => window.close());
   };
-  $("always").addEventListener("click", () => send("always"));
+  document.getElementById("always")?.addEventListener("click", () => send("always"));
   $("session").addEventListener("click", () => send("session"));
   $("deny").addEventListener("click", () => send("deny"));
   // Sem foco automático: um Enter acidental não deve conceder acesso.

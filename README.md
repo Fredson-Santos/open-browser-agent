@@ -65,6 +65,13 @@ Clientes com configuração JSON:
 | `find` | Busca local por texto/rótulo/tipo (`"botão entrar"`), sem LLM |
 | `get_page_text` | Texto legível (prioriza `<article>`/`<main>`) |
 | `computer` | Cliques, hover, arraste, `type`, `key` (`"ctrl+a Delete"`), scroll, `scroll_to`, `wait`, screenshot — alvo por `ref` ou `coordinate` |
+| `form_input` | Define select (pelo texto da opção), checkbox/radio, texto, data… disparando os eventos que React/Vue esperam |
+| `handle_dialog` | Responde a `alert`/`confirm`/`prompt` nativos (a ação que os abre volta na hora avisando) |
+| `read_console` | Console da aba: logs, warnings, erros e exceções não tratadas (filtro por regex) |
+| `read_network` | Requisições com status/tipo/tamanho; `request_id` devolve o corpo da resposta |
+| `file_upload` | Anexa arquivos locais a um `<input type="file">` — o usuário confirma cada envio |
+| `gif_creator` | Grava as ações como GIF (com o ponto do clique e legenda) em `Downloads/oba` |
+| `javascript` | Executa JS na página — **desligado por padrão**, ativado no side panel |
 
 O motor de percepção (`src/content`) é injetado sob demanda via `chrome.scripting`:
 percorre shadow DOM aberto e iframes de mesma origem, detecta elementos
@@ -116,7 +123,7 @@ mais recente, ou o escolhido com `oba mcp --browser brave` / `OBA_BROWSER=edge`.
 2. ✅ Árvore de acessibilidade com refs, `find`, `get_page_text`, `computer` (mouse/teclado via CDP)
 3. ✅ Cursor fantasma, borda de controle, botão Parar/Retomar
 4. ✅ Pareamento por agente, permissões por site, side panel, escolha de navegador
-5. Console, network, `form_input`, upload, GIF
+5. ✅ Console, rede, `form_input`, diálogos nativos, upload, GIF, `javascript` opcional
 
 ## Desenvolvimento
 
