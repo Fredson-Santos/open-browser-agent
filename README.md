@@ -52,7 +52,7 @@ Clientes com configuração JSON:
 { "mcpServers": { "oba": { "command": "C:\\Users\\<você>\\go\\bin\\oba.exe", "args": ["mcp"] } } }
 ```
 
-## Ferramentas (fase 1)
+## Ferramentas
 
 | Ferramenta | O que faz |
 | --- | --- |
@@ -60,12 +60,23 @@ Clientes com configuração JSON:
 | `tabs_create` | Cria aba no grupo, opcionalmente com URL |
 | `tabs_close` | Fecha aba do grupo |
 | `navigate` | URL, `back`, `forward` ou `reload`, esperando o carregamento |
-| `screenshot` | Captura a área visível (CDP `Page.captureScreenshot`) |
+| `screenshot` | Captura a viewport, redimensionada para pixels CSS (= coordenadas do `computer`) |
+| `read_page` | Árvore `role "nome" [ref_N]`; `filter: "interactive"`, `ref_id`, `max_depth` |
+| `find` | Busca local por texto/rótulo/tipo (`"botão entrar"`), sem LLM |
+| `get_page_text` | Texto legível (prioriza `<article>`/`<main>`) |
+| `computer` | Cliques, hover, arraste, `type`, `key` (`"ctrl+a Delete"`), scroll, `scroll_to`, `wait`, screenshot — alvo por `ref` ou `coordinate` |
+
+O motor de percepção (`src/content`) é injetado sob demanda via `chrome.scripting`:
+percorre shadow DOM aberto e iframes de mesma origem, detecta elementos
+clicáveis sem role (`cursor: pointer`, `onclick`, `tabindex`), ignora ocultos e
+substitui valores de senha, cartão e OTP por `[value redacted]`. Os refs usam
+`WeakRef` e expiram quando a página muda. Mouse e teclado usam CDP
+(`Input.dispatch*`), gerando eventos com `isTrusted = true`.
 
 ## Roteiro
 
 1. ✅ Ponte MCP ↔ host ↔ extensão, abas, navegação, screenshot
-2. Árvore de acessibilidade com `ref_id`, `find`, `get_page_text`, `computer` (clique/teclado via CDP)
+2. ✅ Árvore de acessibilidade com refs, `find`, `get_page_text`, `computer` (mouse/teclado via CDP)
 3. Cursor fantasma, borda de controle, botão Stop
 4. Pareamento por agente, permissões por site, side panel
 5. Console, network, `form_input`, upload, GIF

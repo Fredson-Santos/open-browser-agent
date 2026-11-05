@@ -27,6 +27,13 @@ async function attach(tabId: number): Promise<void> {
     }
   }
   attached.add(tabId);
+  // Faz a página se comportar como focada mesmo com o usuário em outra janela
+  // (ex.: no terminal do agente); sem isso, foco e digitação podem falhar.
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true });
+  } catch {
+    /* opcional */
+  }
 }
 
 export async function send<T = unknown>(

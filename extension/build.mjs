@@ -7,19 +7,17 @@ const watch = process.argv.includes("--watch");
 mkdirSync("dist", { recursive: true });
 cpSync("manifest.json", "dist/manifest.json");
 
-const options = {
-  entryPoints: { background: "src/background.ts" },
-  outdir: "dist",
-  bundle: true,
-  format: "esm",
-  target: "chrome116",
-  sourcemap: true,
-  logLevel: "info",
-};
+const common = { outdir: "dist", bundle: true, target: "chrome116", sourcemap: true, logLevel: "info" };
+
+const builds = [
+  // service worker (módulo ES)
+  { ...common, entryPoints: { background: "src/background.ts" }, format: "esm" },
+  // motor injetado na página via chrome.scripting (script clássico)
+  { ...common, entryPoints: { content: "src/content/index.ts" }, format: "iife" },
+];
 
 if (watch) {
-  const ctx = await context(options);
-  await ctx.watch();
+  for (const b of builds) await (await context(b)).watch();
 } else {
-  await build(options);
+  await Promise.all(builds.map((b) => build(b)));
 }
