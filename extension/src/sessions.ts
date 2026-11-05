@@ -4,10 +4,12 @@
 import * as cdp from "./cdp";
 import * as overlay from "./overlay";
 
-export type Session = { client: string; groupId?: number; stopped?: boolean };
+import { K, type SessionView } from "./store";
+
+export type Session = SessionView;
 type Store = Record<string, Session>;
 
-const KEY = "oba.sessions";
+const KEY = K.sessions;
 
 async function load(): Promise<Store> {
   const data = await chrome.storage.session.get(KEY);
@@ -33,6 +35,12 @@ async function put(id: string, s: Session): Promise<void> {
 
 export async function info(id: string): Promise<Session | undefined> {
   return (await load())[id];
+}
+
+/** Atualiza campos da sessão (aprovação, sites liberados nesta sessão…). */
+export async function patch(id: string, client: string, fields: Partial<Session>): Promise<void> {
+  const s = await get(id, client);
+  await put(id, { ...s, ...fields });
 }
 
 /** Encontra a sessão dona de um grupo de abas. */

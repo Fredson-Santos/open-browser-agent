@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OBA · Permissão</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { padding: 22px 22px 18px; display: flex; flex-direction: column; min-height: 100vh; }
+    .kicker { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+    h1 { font-size: 18px; line-height: 1.35; margin-top: 8px; text-wrap: balance; }
+    h1 b { overflow-wrap: anywhere; }
+    .why { margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .actions { margin-top: auto; padding-top: 18px; display: grid; gap: 8px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  </style>
+</head>
+<body>
+  <p class="kicker" id="kicker">Pedido de acesso</p>
+  <h1 id="title">Carregando…</h1>
+  <p class="why" id="why"></p>
+  <div class="actions">
+    <button class="primary" id="always"></button>
+    <div class="row">
+      <button id="session"></button>
+      <button class="danger" id="deny"></button>
+    </div>
+  </div>
+  <script src="approve.js"></script>
+</body>
+</html>

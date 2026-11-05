@@ -139,15 +139,53 @@ function isClickableGeneric(el: Element): boolean {
   return !parent || style(parent).cursor !== "pointer"; // só o elemento mais externo
 }
 
+const FORM_CONTROLS = new Set(["input", "select", "textarea"]);
+
 function isHidden(el: Element): boolean {
   if (el.getAttribute("aria-hidden") === "true") return true;
+  // Checkboxes/radios estilizados costumam esconder o <input> real com
+  // opacity: 0 e desenhar outro elemento por cima; o controle continua usável.
+  const checkOpacity = !FORM_CONTROLS.has(el.tagName.toLowerCase());
   const anyEl = el as Element & { checkVisibility?: (o: object) => boolean };
   if (anyEl.checkVisibility) {
-    if (anyEl.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+    if (anyEl.checkVisibility({ checkOpacity, checkVisibilityCSS: true })) return false;
     return style(el).display !== "contents"; // display:contents não tem caixa, mas os filhos sim
   }
   const s = style(el);
-  return s.display === "none" || s.visibility === "hidden" || s.opacity === "0";
+  return s.display === "none" || s.visibility === "hidden" || (checkOpacity && s.opacity === "0");
+}
+
+/**
+ * Texto acessível de um elemento: junta os nós de texto inserindo espaço nas
+ * fronteiras de bloco (inclusive itens de flex/grid), para não gerar
+ * "Ir para DashboardPágina" a partir de <span>Ir para Dashboard</span><span>Página</span>.
+ */
+function textOf(root: Element, limit = 300): string {
+  let out = "";
+  const visit = (n: Node) => {
+    for (const c of Array.from(n.childNodes)) {
+      if (out.length > limit) return;
+      if (c.nodeType === 3) {
+        out += c.textContent ?? "";
+      } else if (c.nodeType === 1) {
+        const e = c as Element;
+        const tag = e.tagName.toLowerCase();
+        if (SKIP_TAGS.has(tag) || e.getAttribute("aria-hidden") === "true") continue;
+        if (tag === "br") {
+          out += " ";
+          continue;
+        }
+        const d = style(e).display;
+        if (d === "none") continue;
+        const block = !d.startsWith("inline") && d !== "contents";
+        if (block) out += " ";
+        visit(e);
+        if (block) out += " ";
+      }
+    }
+  };
+  visit(root);
+  return out;
 }
 
 function isSensitive(el: Element): boolean {
@@ -173,7 +211,10 @@ function textByIds(el: Element, attr: string): string {
   const list = el.getAttribute(attr);
   if (!list) return "";
   const doc = el.ownerDocument;
-  return clean(list.split(/\s+/).map((id) => doc.getElementById(id)?.textContent ?? "").join(" "));
+  return clean(list.split(/\s+/).map((id) => {
+    const target = doc.getElementById(id);
+    return target ? textOf(target) : "";
+  }).join(" "));
 }
 
 function nameOf(el: Element, role: string | null): string {
@@ -186,7 +227,7 @@ function nameOf(el: Element, role: string | null): string {
   if (tag === "input" || tag === "textarea" || tag === "select") {
     const labels = (el as HTMLInputElement).labels;
     if (labels && labels.length) {
-      const t = clean(Array.from(labels).map((l) => l.textContent).join(" "));
+      const t = clean(Array.from(labels).map((l) => textOf(l)).join(" "));
       if (t) return t;
     }
     const t = (el as HTMLInputElement).type;
@@ -198,7 +239,7 @@ function nameOf(el: Element, role: string | null): string {
   if (tag === "img" || tag === "area") return clean(el.getAttribute("alt")) || clean(el.getAttribute("title"));
   if (tag === "iframe") return clean(el.getAttribute("title")) || clean(el.getAttribute("src"), 80);
   if (role && NAME_FROM_CONTENT.has(role)) {
-    const t = clean(el.textContent);
+    const t = clean(textOf(el));
     if (t) return t;
     const img = el.querySelector("img[alt]");
     if (img) return clean(img.getAttribute("alt"));
@@ -324,9 +365,18 @@ function walk(el: Element, depth: number, inNamed: boolean, st: WalkState): void
   for (const child of childrenOf(el)) walk(child, nextDepth, named, st);
 }
 
+/** Diálogo modal aberto no topo (o resto da página está inerte por trás dele). */
+function activeModal(): Element | null {
+  const candidates = Array.from(document.querySelectorAll('dialog, [aria-modal="true"]')).filter((e) => {
+    if (e.tagName.toLowerCase() === "dialog" && !e.matches(":modal")) return false;
+    return !isHidden(e);
+  });
+  return candidates.at(-1) ?? null;
+}
+
 function rootFor(refId?: string): Element {
   if (refId) return getRef(refId);
-  return document.body ?? document.documentElement;
+  return activeModal() ?? document.body ?? document.documentElement;
 }
 
 // ---------------------------------------------------------------- API
@@ -360,9 +410,12 @@ function readPage(opts: ReadOptions = {}): string {
       return true;
     },
   };
-  walk(rootFor(opts.ref_id), 0, false, st);
+  const root = rootFor(opts.ref_id);
+  walk(root, 0, false, st);
 
-  const header = `URL: ${location.href}\nTítulo: ${document.title}\nViewport: ${innerWidth}x${innerHeight}, scroll ${Math.round(scrollX)},${Math.round(scrollY)} de ${document.documentElement.scrollWidth}x${document.documentElement.scrollHeight}\n`;
+  const modal = !opts.ref_id && root !== document.body && root !== document.documentElement;
+  const header = `URL: ${location.href}\nTítulo: ${document.title}\nViewport: ${innerWidth}x${innerHeight}, scroll ${Math.round(scrollX)},${Math.round(scrollY)} de ${document.documentElement.scrollWidth}x${document.documentElement.scrollHeight}\n` +
+    (modal ? `Modal aberto: mostrando só o diálogo "${nameOf(root, "dialog") || clean(textOf(root), 40)}" (o resto da página está bloqueado por trás dele).\n` : "");
   const notes: string[] = [];
   if (truncated) notes.push(`(saída truncada em ${maxChars} caracteres; use filter="interactive" ou ref_id para focar numa subárvore)`);
   if (st.timedOut) notes.push("(tempo limite de 1,5s atingido; árvore parcial)");
@@ -450,7 +503,13 @@ interface Point {
 
 /** Converte um ref em coordenadas CSS da viewport principal (somando iframes). */
 function resolveRef(refId: string, scroll = true): Point {
-  const el = getRef(refId);
+  let el = getRef(refId);
+  // <input> escondido (opacity 0 / 1px) de um checkbox estilizado: clicar no rótulo visível.
+  const labels = (el as HTMLInputElement).labels;
+  if (FORM_CONTROLS.has(el.tagName.toLowerCase()) && labels?.length) {
+    const box = el.getBoundingClientRect();
+    if (style(el).opacity === "0" || box.width < 4 || box.height < 4) el = labels[0];
+  }
   if (scroll) el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" as ScrollBehavior });
   const r = el.getBoundingClientRect();
   if (r.width === 0 && r.height === 0) throw new Error(`${refId} não tem área visível.`);

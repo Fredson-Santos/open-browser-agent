@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"oba/internal/config"
 	"oba/internal/hub"
@@ -37,6 +38,12 @@ func main() {
 	var err error
 	switch cmd {
 	case "mcp":
+		fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+		browser := fs.String("browser", "", "navegador a controlar (brave, chrome, edge…); padrão: o mais recente")
+		fs.Parse(os.Args[2:])
+		if *browser != "" {
+			mcp.Browser = *browser
+		}
 		err = mcp.Run()
 	case "install":
 		fs := flag.NewFlagSet("install", flag.ExitOnError)
@@ -71,16 +78,30 @@ func main() {
 }
 
 func status() error {
-	info, err := config.ReadHostInfo()
+	hosts, err := config.ListHosts()
 	if err != nil {
-		fmt.Println("✗ navegador desconectado:", err)
+		return err
+	}
+	if len(hosts) == 0 {
+		fmt.Println("✗ nenhum navegador conectado (abra o navegador com a extensão OBA ativa)")
 		return nil
 	}
-	fmt.Printf("native host: pid %d, porta %d, %s\n", info.PID, info.Port, info.Ext)
+	for i, h := range hosts {
+		name := h.Browser
+		if name == "" {
+			name = "navegador"
+		}
+		mark := " "
+		if i == 0 {
+			mark = "*"
+		}
+		since := time.UnixMilli(h.Started).Format("15:04:05")
+		fmt.Printf("%s %-8s pid %-6d porta %-5d desde %s\n", mark, name, h.PID, h.Port, since)
+	}
 	if err := mcp.Probe(); err != nil {
 		fmt.Println("✗ handshake falhou:", err)
 		return nil
 	}
-	fmt.Println("✓ navegador conectado")
+	fmt.Println("✓ conexão ok (* = usado por padrão; escolha outro com `oba mcp --browser <nome>` ou OBA_BROWSER)")
 	return nil
 }

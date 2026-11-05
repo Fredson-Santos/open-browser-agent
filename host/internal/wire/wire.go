@@ -34,4 +34,5 @@ type ExtMsg struct {
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   string          `json:"error,omitempty"`
 	Version string          `json:"version,omitempty"`
+	Browser string          `json:"browser,omitempty"`
 }

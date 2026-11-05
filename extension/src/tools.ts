@@ -5,7 +5,9 @@ import * as cdp from "./cdp";
 import * as input from "./input";
 import * as overlay from "./overlay";
 import * as page from "./page";
+import * as permissions from "./permissions";
 import * as sessions from "./sessions";
+import { K, type LogEntry, getSession } from "./store";
 
 export type Content =
   | { type: "text"; text: string }
@@ -353,29 +355,78 @@ const errorResult = (e: unknown): ToolResult => ({
   isError: true,
 });
 
-export async function run(name: string, ctx: Ctx, args: Args): Promise<ToolResult> {
-  const handler = handlers[name];
-  if (!handler) return errorResult(`ferramenta desconhecida: ${name}`);
-  args ??= {};
-  if ((await sessions.info(ctx.session))?.stopped) return errorResult(STOPPED);
+// Ferramentas que leem ou agem sobre o conteúdo da página atual.
+const PAGE_TOOLS = new Set(["read_page", "find", "get_page_text", "computer", "screenshot"]);
+const HISTORY = new Set(["back", "forward", "reload"]);
 
-  // Liga a borda "trabalhando" na aba alvo enquanto a ferramenta roda.
-  let tabId: number | undefined;
-  if (typeof args.tab_id === "number" && name !== "tabs_close") {
-    try {
-      tabId = (await sessions.ownedTab(ctx.session, ctx.client, args.tab_id)).id;
-      await overlay.attach(tabId!, ctx.client, { busy: true });
-    } catch {
-      tabId = undefined; // o handler reporta o erro de aba
+/** Checa pareamento do agente e permissão do(s) site(s) envolvidos. */
+async function authorize(name: string, ctx: Ctx, args: Args): Promise<void> {
+  await permissions.checkClient(ctx.session, ctx.client);
+  if (name === "navigate" || name === "tabs_create") {
+    const dest = typeof args.url === "string" ? args.url.trim() : "";
+    if (dest && !HISTORY.has(dest.toLowerCase())) {
+      await permissions.checkSite(ctx.session, ctx.client, normalizeUrl(dest));
     }
+  } else if (PAGE_TOOLS.has(name) && typeof args.tab_id === "number") {
+    const tab = await chrome.tabs.get(args.tab_id).catch(() => undefined);
+    await permissions.checkSite(ctx.session, ctx.client, tab?.url);
   }
+}
 
+/** Resumo curto dos argumentos para o log do side panel. */
+function summarize(name: string, args: Args): string {
+  const parts: string[] = [];
+  if (typeof args.action === "string") parts.push(args.action);
+  for (const k of ["url", "query", "ref", "text", "filter"] as const) {
+    const v = args[k];
+    if (typeof v === "string" && v) parts.push(k === "text" && args.action === "type" ? `"${v.length > 24 ? v.slice(0, 23) + "…" : v}"` : v);
+  }
+  if (Array.isArray(args.coordinate)) parts.push(`(${args.coordinate.join(", ")})`);
+  return parts.join(" ").slice(0, 120);
+}
+
+async function log(entry: LogEntry): Promise<void> {
+  const list = await getSession<LogEntry[]>(K.log, []);
+  list.unshift(entry);
+  await chrome.storage.session.set({ [K.log]: list.slice(0, 100) });
+}
+
+export async function run(name: string, ctx: Ctx, args: Args): Promise<ToolResult> {
+  args ??= {};
+  const handler = handlers[name];
+  let result: ToolResult;
+  if (!handler) {
+    result = errorResult(`ferramenta desconhecida: ${name}`);
+  } else if ((await sessions.info(ctx.session))?.stopped) {
+    result = errorResult(STOPPED);
+  } else {
+    result = await execute(handler, name, ctx, args);
+  }
+  const err = result.isError ? result.content.find((c) => c.type === "text")?.text : undefined;
+  await log({ t: Date.now(), client: ctx.client, tool: name, detail: summarize(name, args), ok: !result.isError, error: err?.slice(0, 200) });
+  return result;
+}
+
+async function execute(handler: Handler, name: string, ctx: Ctx, args: Args): Promise<ToolResult> {
   let reject!: (e: Error) => void;
   const aborted = new Promise<never>((_, r) => (reject = r));
   const set = inflight.get(ctx.session) ?? new Set();
   set.add(reject);
   inflight.set(ctx.session, set);
+
+  let tabId: number | undefined;
   try {
+    await Promise.race([authorize(name, ctx, args), aborted]);
+
+    // Liga a borda "trabalhando" na aba alvo enquanto a ferramenta roda.
+    if (typeof args.tab_id === "number" && name !== "tabs_close") {
+      try {
+        tabId = (await sessions.ownedTab(ctx.session, ctx.client, args.tab_id)).id;
+        await overlay.attach(tabId!, ctx.client, { busy: true });
+      } catch {
+        tabId = undefined; // o handler reporta o erro de aba
+      }
+    }
     return await Promise.race([handler(ctx, args), aborted]);
   } catch (e) {
     return errorResult(e);

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OBA</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { padding: 16px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    header h1 { font-size: 16px; }
+    .status { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+    .status .text { flex: 1; min-width: 0; }
+    .status small { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    section { margin-top: 22px; }
+    h2 { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+    ul { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    li { display: flex; align-items: center; gap: 10px; padding: 9px 12px; }
+    li + li { border-top: 1px solid var(--border); }
+    li .main { flex: 1; min-width: 0; }
+    li .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    li small { display: block; color: var(--muted); font-size: 12px; }
+    .empty { padding: 12px; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); font-size: 13px; }
+    .tag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); }
+    .tag.allow { color: var(--ok); }
+    .tag.block { color: var(--danger); }
+    .policy { display: block; margin-bottom: 10px; }
+    .log li { align-items: flex-start; font-size: 13px; }
+    .log .dot { margin-top: 6px; }
+    .log .when { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
+    .log .err { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+    .log .detail { color: var(--muted); overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OBA · Open Browser Agent</h1>
+  </header>
+
+  <div class="status" id="status" aria-live="polite">
+    <span class="dot" id="status-dot"></span>
+    <div class="text"><span id="status-text">…</span><small id="status-detail"></small></div>
+    <button class="small" id="reconnect" hidden>Reconectar</button>
+  </div>
+
+  <section>
+    <h2>Agentes conectados</h2>
+    <div id="sessions"></div>
+  </section>
+
+  <section>
+    <h2>Agentes autorizados</h2>
+    <div id="clients"></div>
+  </section>
+
+  <section>
+    <h2>Sites</h2>
+    <label class="policy">
+      <select id="policy" aria-label="Política para sites novos">
+        <option value="ask">Perguntar antes de acessar um site novo</option>
+        <option value="allow_all">Permitir todos os sites (exceto bloqueados)</option>
+      </select>
+    </label>
+    <div id="sites"></div>
+  </section>
+
+  <section>
+    <h2>Atividade recente</h2>
+    <div id="log"></div>
+  </section>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

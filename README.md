@@ -87,12 +87,35 @@ roda), um cursor que desliza até o alvo antes de cada clique e uma pílula
   aceita, e só cliques reais do usuário) e é escondido durante screenshots.
 - Quando o agente desconecta, o overlay e o depurador são removidos.
 
+## Permissões
+
+- **Pareamento:** na primeira chamada de um agente novo abre uma janela
+  "\<agente\> quer controlar este navegador" — *Permitir sempre*, *Só desta vez*
+  ou *Recusar*. O nome vem do `clientInfo` do MCP (informado pelo próprio
+  agente); a autenticação de fato é o token local.
+- **Sites:** antes de ler ou agir num domínio novo, a extensão pergunta —
+  *Sempre permitir neste site*, *Permitir agora* (só nesta sessão) ou
+  *Bloquear site*. Fechar a janela não grava nada. No side panel dá para trocar
+  a política para "permitir todos (exceto bloqueados)".
+
+## Side panel
+
+Clique no ícone da extensão: status da conexão, agentes conectados (com
+Parar/Retomar), agentes autorizados (revogar), regras por site e o log das
+últimas ações.
+
+## Vários navegadores
+
+Cada navegador (ou perfil) com a extensão ativa inicia o próprio host e se
+registra em `%APPDATA%\oba\hosts\`. `oba status` lista todos; `oba mcp` usa o
+mais recente, ou o escolhido com `oba mcp --browser brave` / `OBA_BROWSER=edge`.
+
 ## Roteiro
 
 1. ✅ Ponte MCP ↔ host ↔ extensão, abas, navegação, screenshot
 2. ✅ Árvore de acessibilidade com refs, `find`, `get_page_text`, `computer` (mouse/teclado via CDP)
 3. ✅ Cursor fantasma, borda de controle, botão Parar/Retomar
-4. Pareamento por agente, permissões por site, side panel
+4. ✅ Pareamento por agente, permissões por site, side panel, escolha de navegador
 5. Console, network, `form_input`, upload, GIF
 
 ## Desenvolvimento

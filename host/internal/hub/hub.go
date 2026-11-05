@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"oba/internal/config"
 	"oba/internal/nativemsg"
@@ -47,6 +48,7 @@ type Hub struct {
 	mu      sync.Mutex
 	pending map[string]pending
 	clients map[string]*client
+	info    config.HostInfo
 }
 
 // Run executa o native host até a extensão fechar a conexão.
@@ -67,7 +69,8 @@ func Run(origin string) error {
 	}
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
-	if err := config.WriteHostInfo(config.HostInfo{Port: port, PID: os.Getpid(), Ext: origin}); err != nil {
+	info := config.HostInfo{Port: port, PID: os.Getpid(), Ext: origin, Started: time.Now().UnixMilli()}
+	if err := config.WriteHostInfo(info); err != nil {
 		return err
 	}
 	defer config.RemoveHostInfo()
@@ -78,6 +81,7 @@ func Run(origin string) error {
 		token:   token,
 		pending: map[string]pending{},
 		clients: map[string]*client{},
+		info:    info,
 	}
 	go h.accept(ln)
 	h.ext.Send(wire.ExtMsg{Type: "host_info", Version: config.Version})
@@ -108,7 +112,11 @@ func (h *Hub) readExtension(r io.Reader) error {
 				p.c.send(wire.HostMsg{Type: "result", ID: p.id, Result: m.Result, Error: m.Error})
 			}
 		case "hello":
-			log.Printf("extensão conectada (versão %s)", m.Version)
+			log.Printf("extensão conectada (versão %s, navegador %s)", m.Version, m.Browser)
+			if m.Browser != "" {
+				h.info.Browser = m.Browser
+				config.WriteHostInfo(h.info)
+			}
 		}
 	}
 }

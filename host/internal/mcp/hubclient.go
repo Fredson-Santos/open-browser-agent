@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,21 +33,47 @@ func newHubClient(name string) *hubClient {
 	return &hubClient{name: name, pending: map[int64]chan wire.HostMsg{}}
 }
 
+// Browser é a preferência de navegador (flag --browser ou OBA_BROWSER).
+// Vazio = o navegador cuja extensão conectou mais recentemente.
+var Browser = os.Getenv("OBA_BROWSER")
+
+// dialHost conecta ao native host preferido, descartando registros obsoletos.
+func dialHost() (net.Conn, config.HostInfo, error) {
+	hosts, err := config.ListHosts()
+	if err != nil {
+		return nil, config.HostInfo{}, err
+	}
+	want := strings.ToLower(strings.TrimSpace(Browser))
+	var others []string
+	for _, h := range hosts {
+		if want != "" && !strings.Contains(strings.ToLower(h.Browser), want) {
+			others = append(others, h.Browser)
+			continue
+		}
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", h.Port), 2*time.Second)
+		if err != nil {
+			os.Remove(h.Path) // ninguém escutando: o host morreu sem limpar
+			continue
+		}
+		return conn, h, nil
+	}
+	if want != "" && len(others) > 0 {
+		return nil, config.HostInfo{}, fmt.Errorf("nenhum navegador %q conectado (disponíveis: %s)", Browser, strings.Join(others, ", "))
+	}
+	return nil, config.HostInfo{}, errNotConnected
+}
+
 func (h *hubClient) connect() (net.Conn, error) {
 	if h.conn != nil {
 		return h.conn, nil
-	}
-	info, err := config.ReadHostInfo()
-	if err != nil {
-		return nil, errNotConnected
 	}
 	token, err := config.Token()
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", info.Port), 3*time.Second)
+	conn, _, err := dialHost()
 	if err != nil {
-		return nil, errNotConnected
+		return nil, err
 	}
 	b, _ := json.Marshal(wire.ClientMsg{Type: "hello", Token: token, Client: h.name})
 	conn.Write(append(b, '\n'))

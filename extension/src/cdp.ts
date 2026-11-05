@@ -34,6 +34,34 @@ async function attach(tabId: number): Promise<void> {
   } catch {
     /* opcional */
   }
+  await waitViewportStable(tabId);
+}
+
+/**
+ * Ao anexar, o navegador mostra a barra "está depurando", que encolhe a
+ * viewport logo em seguida. Espera a altura estabilizar para que screenshots
+ * e coordenadas usem o tamanho final.
+ */
+async function waitViewportStable(tabId: number): Promise<void> {
+  const height = async () => {
+    try {
+      const r = (await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+        expression: "innerHeight",
+        returnByValue: true,
+      })) as { result?: { value?: number } };
+      return r.result?.value ?? 0;
+    } catch {
+      return 0;
+    }
+  };
+  let last = await height();
+  let stableFor = 0;
+  for (let waited = 0; waited < 1500 && stableFor < 300; waited += 100) {
+    await new Promise((r) => setTimeout(r, 100));
+    const h = await height();
+    stableFor = h === last ? stableFor + 100 : 0;
+    last = h;
+  }
 }
 
 /** Solta o depurador da aba (remove a barra "está depurando este navegador"). */

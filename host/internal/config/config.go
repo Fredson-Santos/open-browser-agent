@@ -5,9 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -16,7 +17,7 @@ const (
 	HostName = "com.oba.browser"
 	// ExtensionID é derivado da chave pública fixada em extension/manifest.json.
 	ExtensionID = "pfikhdcedpalmkfjbkldnfdiohhfomml"
-	Version     = "0.3.0"
+	Version     = "0.4.0"
 )
 
 // Dir retorna o diretório de dados do OBA (%APPDATA%\oba no Windows).
@@ -55,18 +56,32 @@ func Token() (string, error) {
 	return tok, os.WriteFile(p, []byte(tok), 0o600)
 }
 
-// HostInfo descreve o native host em execução (escrito por ele em host.json).
+// HostInfo descreve um native host em execução. Cada navegador (ou perfil)
+// com a extensão ativa inicia o seu, e cada um grava hosts/<pid>.json.
 type HostInfo struct {
-	Port int    `json:"port"`
-	PID  int    `json:"pid"`
-	Ext  string `json:"extension_origin"`
+	Port    int    `json:"port"`
+	PID     int    `json:"pid"`
+	Ext     string `json:"extension_origin"`
+	Browser string `json:"browser,omitempty"`
+	Started int64  `json:"started"` // unix ms
+	Path    string `json:"-"`
+}
+
+func hostsDir() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	d := filepath.Join(dir, "hosts")
+	return d, os.MkdirAll(d, 0o700)
 }
 
 func WriteHostInfo(h HostInfo) error {
-	p, err := path("host.json")
+	dir, err := hostsDir()
 	if err != nil {
 		return err
 	}
+	p := filepath.Join(dir, fmt.Sprintf("%d.json", h.PID))
 	b, _ := json.Marshal(h)
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
@@ -75,27 +90,40 @@ func WriteHostInfo(h HostInfo) error {
 	return os.Rename(tmp, p)
 }
 
-func ReadHostInfo() (HostInfo, error) {
-	var h HostInfo
-	p, err := path("host.json")
+// ListHosts retorna os hosts registrados, do mais recente para o mais antigo.
+func ListHosts() ([]HostInfo, error) {
+	dir, err := hostsDir()
 	if err != nil {
-		return h, err
+		return nil, err
 	}
-	b, err := os.ReadFile(p)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return h, errors.New("native host não está rodando (host.json ausente)")
+		return nil, err
 	}
-	return h, json.Unmarshal(b, &h)
+	var hosts []HostInfo
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var h HostInfo
+		if json.Unmarshal(b, &h) == nil && h.Port > 0 {
+			h.Path = p
+			hosts = append(hosts, h)
+		}
+	}
+	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Started > hosts[j].Started })
+	return hosts, nil
 }
 
-// RemoveHostInfo apaga host.json apenas se ele ainda pertencer a este processo.
+// RemoveHostInfo apaga o registro deste processo.
 func RemoveHostInfo() {
-	p, err := path("host.json")
-	if err != nil {
-		return
-	}
-	if h, err := ReadHostInfo(); err == nil && h.PID == os.Getpid() {
-		os.Remove(p)
+	if dir, err := hostsDir(); err == nil {
+		os.Remove(filepath.Join(dir, fmt.Sprintf("%d.json", os.Getpid())))
 	}
 }
 
