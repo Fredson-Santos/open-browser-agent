@@ -3,6 +3,7 @@
 
 import * as cdp from "./cdp";
 import * as input from "./input";
+import * as overlay from "./overlay";
 import * as page from "./page";
 import * as sessions from "./sessions";
 
@@ -86,10 +87,12 @@ async function capture(tab: chrome.tabs.Tab, format: "jpeg" | "png") {
   const tabId = tab.id!;
   if (cdp.isRestricted(tab.url)) throw new Error(`o navegador não permite capturar ${tab.url}.`);
   await activate(tab);
-  const { data } = await cdp.send<{ data: string }>(tabId, "Page.captureScreenshot", {
-    format,
-    ...(format === "jpeg" ? { quality: 80 } : {}),
-  });
+  const { data } = await overlay.hiddenDuring(tabId, () =>
+    cdp.send<{ data: string }>(tabId, "Page.captureScreenshot", {
+      format,
+      ...(format === "jpeg" ? { quality: 80 } : {}),
+    }),
+  );
   const { result } = await cdp.send<{ result: { value: number } }>(tabId, "Runtime.evaluate", {
     expression: "window.devicePixelRatio",
     returnByValue: true,
@@ -175,20 +178,21 @@ async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
       const t = await target(tabId, args);
       const button: input.Button = action === "right_click" ? "right" : action === "middle_click" ? "middle" : "left";
       const count = action === "double_click" ? 2 : action === "triple_click" ? 3 : 1;
-      await input.click(tabId, t.x, t.y, button, count, modifiers(args.modifiers));
+      await overlay.pointAt(tabId, t.x, t.y, () => input.click(tabId, t.x, t.y, button, count, modifiers(args.modifiers)));
       return text(`${action} em (${t.x}, ${t.y})${t.note}`);
     }
 
     case "hover": {
       const t = await target(tabId, args);
-      await input.move(tabId, t.x, t.y);
+      await overlay.pointAt(tabId, t.x, t.y, () => input.move(tabId, t.x, t.y), false);
       return text(`Mouse sobre (${t.x}, ${t.y})${t.note}`);
     }
 
     case "left_click_drag": {
       const from = coord(args.start_coordinate, "start_coordinate");
       const to = coord(args.coordinate);
-      await input.drag(tabId, from, to);
+      await overlay.pointAt(tabId, from[0], from[1], () => input.drag(tabId, from, to), false);
+      await overlay.pointAt(tabId, to[0], to[1], async () => {}, false);
       return text(`Arrastou de (${from}) para (${to})`);
     }
 
@@ -198,7 +202,7 @@ async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
       let where = "no elemento focado";
       if (args.ref || args.coordinate) {
         const t = await target(tabId, args);
-        await input.click(tabId, t.x, t.y);
+        await overlay.pointAt(tabId, t.x, t.y, () => input.click(tabId, t.x, t.y));
         where = `em (${t.x}, ${t.y})${t.note}`;
       }
       await input.insertText(tabId, value);
@@ -331,12 +335,52 @@ const handlers: Record<string, Handler> = {
   computer,
 };
 
+const STOPPED =
+  "O usuário pausou o agente pelo botão Parar no navegador. Não continue a tarefa: " +
+  "pergunte ao usuário como prosseguir. Novas ações ficam bloqueadas até ele clicar em Retomar.";
+
+// Chamadas em andamento por sessão, para o botão Parar poder interrompê-las.
+const inflight = new Map<string, Set<(e: Error) => void>>();
+
+/** Interrompe as chamadas em andamento da sessão (a resposta volta como erro). */
+export function abortSession(session: string): void {
+  for (const reject of inflight.get(session) ?? []) reject(new Error(STOPPED));
+  inflight.delete(session);
+}
+
+const errorResult = (e: unknown): ToolResult => ({
+  content: [{ type: "text", text: String((e as Error)?.message ?? e) }],
+  isError: true,
+});
+
 export async function run(name: string, ctx: Ctx, args: Args): Promise<ToolResult> {
   const handler = handlers[name];
-  if (!handler) return { content: [{ type: "text", text: `ferramenta desconhecida: ${name}` }], isError: true };
+  if (!handler) return errorResult(`ferramenta desconhecida: ${name}`);
+  args ??= {};
+  if ((await sessions.info(ctx.session))?.stopped) return errorResult(STOPPED);
+
+  // Liga a borda "trabalhando" na aba alvo enquanto a ferramenta roda.
+  let tabId: number | undefined;
+  if (typeof args.tab_id === "number" && name !== "tabs_close") {
+    try {
+      tabId = (await sessions.ownedTab(ctx.session, ctx.client, args.tab_id)).id;
+      await overlay.attach(tabId!, ctx.client, { busy: true });
+    } catch {
+      tabId = undefined; // o handler reporta o erro de aba
+    }
+  }
+
+  let reject!: (e: Error) => void;
+  const aborted = new Promise<never>((_, r) => (reject = r));
+  const set = inflight.get(ctx.session) ?? new Set();
+  set.add(reject);
+  inflight.set(ctx.session, set);
   try {
-    return await handler(ctx, args ?? {});
+    return await Promise.race([handler(ctx, args), aborted]);
   } catch (e) {
-    return { content: [{ type: "text", text: String((e as Error)?.message ?? e) }], isError: true };
+    return errorResult(e);
+  } finally {
+    set.delete(reject);
+    if (tabId !== undefined) await overlay.setBusy(tabId, false);
   }
 }

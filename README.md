@@ -73,11 +73,25 @@ substitui valores de senha, cartão e OTP por `[value redacted]`. Os refs usam
 `WeakRef` e expiram quando a página muda. Mouse e teclado usam CDP
 (`Input.dispatch*`), gerando eventos com `isTrusted = true`.
 
+## Indicadores visuais e botão Parar
+
+Nas abas de um agente aparece uma borda ciano (pulsando enquanto uma ação
+roda), um cursor que desliza até o alvo antes de cada clique e uma pílula
+"<agente> está controlando esta aba · **Parar**".
+
+- **Parar** interrompe na hora a ação em andamento, solta o depurador (a barra
+  de aviso some) e faz qualquer nova chamada do agente falhar com uma mensagem
+  pedindo que ele pergunte ao usuário. A borda fica vermelha e o botão vira
+  **Retomar**.
+- O overlay fica num Shadow DOM fechado, não intercepta cliques (só o botão
+  aceita, e só cliques reais do usuário) e é escondido durante screenshots.
+- Quando o agente desconecta, o overlay e o depurador são removidos.
+
 ## Roteiro
 
 1. ✅ Ponte MCP ↔ host ↔ extensão, abas, navegação, screenshot
 2. ✅ Árvore de acessibilidade com refs, `find`, `get_page_text`, `computer` (mouse/teclado via CDP)
-3. Cursor fantasma, borda de controle, botão Stop
+3. ✅ Cursor fantasma, borda de controle, botão Parar/Retomar
 4. Pareamento por agente, permissões por site, side panel
 5. Console, network, `form_input`, upload, GIF
 

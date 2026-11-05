@@ -1,7 +1,10 @@
 // Cada sessão (um agente conectado) tem seu próprio grupo de abas.
 // O estado fica em chrome.storage.session para sobreviver a restarts do service worker.
 
-type Session = { client: string; groupId?: number };
+import * as cdp from "./cdp";
+import * as overlay from "./overlay";
+
+export type Session = { client: string; groupId?: number; stopped?: boolean };
 type Store = Record<string, Session>;
 
 const KEY = "oba.sessions";
@@ -28,6 +31,17 @@ async function put(id: string, s: Session): Promise<void> {
   await save(store);
 }
 
+export async function info(id: string): Promise<Session | undefined> {
+  return (await load())[id];
+}
+
+/** Encontra a sessão dona de um grupo de abas. */
+export async function byGroup(groupId: number | undefined): Promise<[string, Session] | undefined> {
+  if (groupId === undefined || groupId < 0) return undefined;
+  const store = await load();
+  return Object.entries(store).find(([, s]) => s.groupId === groupId);
+}
+
 /** Retorna o grupo da sessão, se ainda existir no navegador. */
 async function liveGroup(s: Session): Promise<chrome.tabGroups.TabGroup | undefined> {
   if (s.groupId === undefined) return undefined;
@@ -38,11 +52,13 @@ async function liveGroup(s: Session): Promise<chrome.tabGroups.TabGroup | undefi
   }
 }
 
+async function groupTabs(s: Session | undefined): Promise<chrome.tabs.Tab[]> {
+  const g = s && (await liveGroup(s));
+  return g ? chrome.tabs.query({ groupId: g.id }) : [];
+}
+
 export async function listTabs(id: string, client: string): Promise<chrome.tabs.Tab[]> {
-  const s = await get(id, client);
-  const g = await liveGroup(s);
-  if (!g) return [];
-  return chrome.tabs.query({ groupId: g.id });
+  return groupTabs(await get(id, client));
 }
 
 /** Cria uma aba dentro do grupo da sessão (criando o grupo se preciso). */
@@ -91,12 +107,38 @@ export async function ownedTab(id: string, client: string, tabId: unknown): Prom
   return tab;
 }
 
+/** Pausa ou retoma a sessão; pausar também solta o depurador das abas dela. */
+export async function setStopped(id: string, stopped: boolean): Promise<void> {
+  const store = await load();
+  const s = store[id];
+  if (!s) return;
+  s.stopped = stopped;
+  await save(store);
+  const g = await liveGroup(s);
+  if (g) {
+    await chrome.tabGroups.update(g.id, {
+      title: stopped ? `OBA · ${s.client} (pausado)` : `OBA · ${s.client}`,
+      color: stopped ? "red" : "cyan",
+    });
+  }
+  for (const tab of await groupTabs(s)) {
+    await overlay.setStopped(tab.id!, stopped);
+    if (stopped) await cdp.detach(tab.id!);
+  }
+}
+
+/** Agente desconectou: remove indicadores e solta o depurador das abas dele. */
 export async function close(id: string): Promise<void> {
   const store = await load();
   const s = store[id];
   delete store[id];
   await save(store);
-  const g = s && (await liveGroup(s));
+  if (!s) return;
+  for (const tab of await groupTabs(s)) {
+    await overlay.remove(tab.id!);
+    await cdp.detach(tab.id!);
+  }
+  const g = await liveGroup(s);
   if (g) await chrome.tabGroups.update(g.id, { title: `OBA · ${s.client} (desconectado)`, color: "grey" });
 }
 

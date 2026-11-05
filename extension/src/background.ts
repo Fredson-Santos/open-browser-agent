@@ -5,6 +5,7 @@
 // então não precisamos de offscreen keepalive neste transporte. O alarme só
 // reconecta caso o host não esteja instalado/rodando.
 
+import * as overlay from "./overlay";
 import * as sessions from "./sessions";
 import * as tools from "./tools";
 
@@ -80,6 +81,29 @@ async function handle(p: chrome.runtime.Port, msg: HostMessage): Promise<void> {
       break;
   }
 }
+
+// Botão Parar/Retomar da pílula (só o overlay da extensão consegue enviar isso).
+chrome.runtime.onMessage.addListener((msg: { type?: string }, sender) => {
+  if (sender.id !== chrome.runtime.id || !sender.tab) return;
+  if (msg.type !== "OBA_STOP" && msg.type !== "OBA_RESUME") return;
+  void (async () => {
+    const found = await sessions.byGroup(sender.tab!.groupId);
+    if (!found) return;
+    const [id] = found;
+    const stop = msg.type === "OBA_STOP";
+    if (stop) tools.abortSession(id);
+    await sessions.setStopped(id, stop);
+  })();
+});
+
+// Cada navegação apaga o overlay; recoloca nas abas que pertencem a um agente.
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status !== "complete") return;
+  void (async () => {
+    const found = await sessions.byGroup(tab.groupId);
+    if (found) await overlay.attach(tabId, found[1].client, { stopped: found[1].stopped });
+  })();
+});
 
 chrome.alarms.create("oba-reconnect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((a) => {

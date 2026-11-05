@@ -36,6 +36,16 @@ async function attach(tabId: number): Promise<void> {
   }
 }
 
+/** Solta o depurador da aba (remove a barra "está depurando este navegador"). */
+export async function detach(tabId: number): Promise<void> {
+  attached.delete(tabId);
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {
+    /* não estava anexado */
+  }
+}
+
 export async function send<T = unknown>(
   tabId: number,
   method: string,

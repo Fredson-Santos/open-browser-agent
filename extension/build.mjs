@@ -14,6 +14,8 @@ const builds = [
   { ...common, entryPoints: { background: "src/background.ts" }, format: "esm" },
   // motor injetado na página via chrome.scripting (script clássico)
   { ...common, entryPoints: { content: "src/content/index.ts" }, format: "iife" },
+  // indicadores visuais (borda, cursor, pílula Parar)
+  { ...common, entryPoints: { overlay: "src/overlay/index.ts" }, format: "iife" },
 ];
 
 if (watch) {
