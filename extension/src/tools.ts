@@ -16,7 +16,8 @@ export type Content =
 
 export type ToolResult = { content: Content[]; isError?: boolean };
 
-export type Ctx = { session: string; client: string };
+/** `call` identifica a chamada para o host poder cancelá-la (ver abortCall). */
+export type Ctx = { session: string; client: string; call?: string };
 type Args = Record<string, unknown>;
 type Handler = (ctx: Ctx, args: Args) => Promise<ToolResult>;
 
@@ -526,6 +527,26 @@ const STOPPED =
 
 // Chamadas em andamento por sessão, para o botão Parar poder interrompê-las.
 const inflight = new Map<string, Set<(e: Error) => void>>();
+// Chamadas em andamento por id do host, para cancelar uma só.
+const calls = new Map<string, (e: Error) => void>();
+
+/**
+ * Prazo de uma chamada inteira, pedidos de permissão incluídos. Fica abaixo do
+ * timeout do `oba mcp` (CallTimeout em host/internal/mcp/server.go), para o
+ * agente receber este erro, que explica o que houve, e nunca um timeout do
+ * host com a ação ainda rodando no navegador.
+ */
+const CALL_DEADLINE_MS = 210_000;
+
+const DEADLINE =
+  `A chamada passou de ${CALL_DEADLINE_MS / 1000}s (provavelmente esperando o usuário aprovar no navegador) e foi interrompida. ` +
+  "Confira o estado da aba antes de tentar de novo.";
+
+/** O agente desistiu da chamada (timeout do host ou cancelamento MCP). */
+export function abortCall(id: string): void {
+  calls.get(id)?.(new Error("Chamada cancelada pelo agente."));
+  calls.delete(id);
+}
 
 /** Interrompe as chamadas em andamento da sessão (a resposta volta como erro). */
 export function abortSession(session: string): void {
@@ -617,6 +638,8 @@ async function execute(handler: Handler, name: string, ctx: Ctx, args: Args): Pr
   const set = inflight.get(ctx.session) ?? new Set();
   set.add(reject);
   inflight.set(ctx.session, set);
+  if (ctx.call) calls.set(ctx.call, reject);
+  const deadline = setTimeout(() => reject(new Error(DEADLINE)), CALL_DEADLINE_MS);
 
   let tabId: number | undefined;
   try {
@@ -637,7 +660,9 @@ async function execute(handler: Handler, name: string, ctx: Ctx, args: Args): Pr
   } catch (e) {
     return errorResult(e);
   } finally {
+    clearTimeout(deadline);
     set.delete(reject);
+    if (ctx.call) calls.delete(ctx.call);
     if (tabId !== undefined) await overlay.setBusy(tabId, false);
   }
 }

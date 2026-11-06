@@ -4,7 +4,9 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -14,6 +16,11 @@ import (
 )
 
 const defaultProtocol = "2025-06-18"
+
+// CallTimeout é o limite de uma chamada de ferramenta. A extensão encerra a
+// chamada sozinha antes disso (CALL_DEADLINE_MS em extension/src/tools.ts, que
+// já conta os pedidos de permissão), com uma mensagem melhor; este é o teto.
+const CallTimeout = 240 * time.Second
 
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -38,6 +45,9 @@ type server struct {
 	out io.Writer
 	mu  sync.Mutex
 	hub *hubClient
+
+	callsMu sync.Mutex
+	calls   map[string]context.CancelFunc // id JSON-RPC → cancela a chamada
 }
 
 func (s *server) write(r response) {
@@ -50,7 +60,7 @@ func (s *server) write(r response) {
 
 // Run atende o protocolo MCP em stdin/stdout até o stdin fechar.
 func Run() error {
-	s := &server{out: os.Stdout, hub: newHubClient("agente")}
+	s := &server{out: os.Stdout, hub: newHubClient("agente"), calls: map[string]context.CancelFunc{}}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	var wg sync.WaitGroup
@@ -95,6 +105,17 @@ func (s *server) handle(req request) {
 			"instructions": "Controla o navegador do usuário através da extensão OBA. " +
 				"Comece com tabs_context (create_if_empty=true) para obter uma aba do seu grupo.",
 		}})
+	case "notifications/cancelled":
+		var p struct {
+			RequestID json.RawMessage `json:"requestId"`
+		}
+		json.Unmarshal(req.Params, &p)
+		s.callsMu.Lock()
+		cancel := s.calls[string(p.RequestID)]
+		s.callsMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	case "ping":
 		s.write(response{ID: req.ID, Result: map[string]any{}})
 	case "tools/list":
@@ -111,7 +132,19 @@ func (s *server) handle(req request) {
 		if len(p.Arguments) == 0 {
 			p.Arguments = json.RawMessage("{}")
 		}
-		res, err := s.hub.Call(p.Name, p.Arguments, 90*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), CallTimeout)
+		key := string(req.ID)
+		s.callsMu.Lock()
+		s.calls[key] = cancel
+		s.callsMu.Unlock()
+		res, err := s.hub.Call(ctx, p.Name, p.Arguments)
+		s.callsMu.Lock()
+		delete(s.calls, key)
+		s.callsMu.Unlock()
+		cancel()
+		if errors.Is(err, context.Canceled) {
+			return // o agente cancelou: pelo MCP, não se responde a um pedido cancelado
+		}
 		if err != nil {
 			s.write(response{ID: req.ID, Result: toolError(err.Error())})
 			return

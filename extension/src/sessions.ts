@@ -4,12 +4,24 @@
 import * as cdp from "./cdp";
 import * as overlay from "./overlay";
 
-import { K, type SessionView } from "./store";
+import { CHAT_SESSION, K, type SessionView } from "./store";
 
 export type Session = SessionView;
 type Store = Record<string, Session>;
 
 const KEY = K.sessions;
+
+// Toda alteração lê o mapa inteiro do storage e grava de volta. Agentes chamam
+// ferramentas em paralelo, então as alterações passam por esta fila: sem ela,
+// duas chamadas simultâneas (ex.: dois tabs_create sem grupo) se sobrescrevem
+// e uma delas perde o groupId.
+let queue: Promise<unknown> = Promise.resolve();
+
+function locked<T>(fn: () => Promise<T>): Promise<T> {
+  const run = queue.then(fn, fn);
+  queue = run.catch(() => {});
+  return run;
+}
 
 async function load(): Promise<Store> {
   const data = await chrome.storage.session.get(KEY);
@@ -38,9 +50,20 @@ export async function info(id: string): Promise<Session | undefined> {
 }
 
 /** Atualiza campos da sessão (aprovação, sites liberados nesta sessão…). */
-export async function patch(id: string, client: string, fields: Partial<Session>): Promise<void> {
-  const s = await get(id, client);
-  await put(id, { ...s, ...fields });
+export function patch(id: string, client: string, fields: Partial<Session>): Promise<void> {
+  return locked(async () => {
+    const s = await get(id, client);
+    await put(id, { ...s, ...fields });
+  });
+}
+
+/** Libera um site só nesta sessão (lido e gravado dentro da fila, para não perder outro site liberado ao mesmo tempo). */
+export function addSite(id: string, client: string, site: string): Promise<void> {
+  return locked(async () => {
+    const s = await get(id, client);
+    const sites = s.sites ?? [];
+    if (!sites.includes(site)) await put(id, { ...s, sites: [...sites, site] });
+  });
 }
 
 /** Encontra a sessão dona de um grupo de abas. */
@@ -70,7 +93,11 @@ export async function listTabs(id: string, client: string): Promise<chrome.tabs.
 }
 
 /** Cria uma aba dentro do grupo da sessão (criando o grupo se preciso). */
-export async function createTab(id: string, client: string, url?: string): Promise<chrome.tabs.Tab> {
+export function createTab(id: string, client: string, url?: string): Promise<chrome.tabs.Tab> {
+  return locked(() => createTabUnlocked(id, client, url));
+}
+
+async function createTabUnlocked(id: string, client: string, url?: string): Promise<chrome.tabs.Tab> {
   const s = await get(id, client);
   const g = await liveGroup(s);
 
@@ -99,6 +126,30 @@ export async function createTab(id: string, client: string, url?: string): Promi
   return chrome.tabs.get(tabId);
 }
 
+/**
+ * Coloca uma aba já aberta (a aba atual do usuário, no chat embutido) no grupo
+ * da sessão, criando o grupo na janela dela se preciso.
+ */
+export function adoptTab(id: string, client: string, tabId: number): Promise<chrome.tabs.Tab> {
+  return locked(() => adoptTabUnlocked(id, client, tabId));
+}
+
+async function adoptTabUnlocked(id: string, client: string, tabId: number): Promise<chrome.tabs.Tab> {
+  const s = await get(id, client);
+  const g = await liveGroup(s);
+  const tab = await chrome.tabs.get(tabId);
+  if (g && tab.groupId === g.id) return tab;
+  if (g && g.windowId === tab.windowId) {
+    await chrome.tabs.group({ groupId: g.id, tabIds: [tabId] });
+  } else {
+    const groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } });
+    await chrome.tabGroups.update(groupId, { title: `OBA · ${client}`, color: "cyan" });
+    s.groupId = groupId;
+  }
+  await put(id, s);
+  return chrome.tabs.get(tabId);
+}
+
 /** Garante que a aba pertence ao grupo da sessão. */
 export async function ownedTab(id: string, client: string, tabId: unknown): Promise<chrome.tabs.Tab> {
   if (typeof tabId !== "number") throw new Error("tab_id é obrigatório (use tabs_context).");
@@ -117,11 +168,15 @@ export async function ownedTab(id: string, client: string, tabId: unknown): Prom
 
 /** Pausa ou retoma a sessão; pausar também solta o depurador das abas dela. */
 export async function setStopped(id: string, stopped: boolean): Promise<void> {
-  const store = await load();
-  const s = store[id];
+  const s = await locked(async () => {
+    const store = await load();
+    const s = store[id];
+    if (!s) return undefined;
+    s.stopped = stopped;
+    await save(store);
+    return s;
+  });
   if (!s) return;
-  s.stopped = stopped;
-  await save(store);
   const g = await liveGroup(s);
   if (g) {
     await chrome.tabGroups.update(g.id, {
@@ -137,10 +192,7 @@ export async function setStopped(id: string, stopped: boolean): Promise<void> {
 
 /** Agente desconectou: remove indicadores e solta o depurador das abas dele. */
 export async function close(id: string): Promise<void> {
-  const store = await load();
-  const s = store[id];
-  delete store[id];
-  await save(store);
+  const s = await forget(id);
   if (!s) return;
   for (const tab of await groupTabs(s)) {
     await overlay.remove(tab.id!);
@@ -150,8 +202,44 @@ export async function close(id: string): Promise<void> {
   if (g) await chrome.tabGroups.update(g.id, { title: `OBA · ${s.client} (desconectado)`, color: "grey" });
 }
 
-/** Novo native host = sessões antigas não existem mais. */
+/** Remove a sessão do armazenamento e devolve o que ela era. */
+function forget(id: string): Promise<Session | undefined> {
+  return locked(async () => {
+    const store = await load();
+    const s = store[id];
+    if (!s) return undefined;
+    delete store[id];
+    await save(store);
+    return s;
+  });
+}
+
+/**
+ * Fim de uma rodada do chat embutido: tira overlay e depurador das abas (some a
+ * barra "está depurando" e o beforeunload volta ao normal), mas mantém o grupo,
+ * para a conversa continuar usando os mesmos tab_id.
+ */
+export async function idle(id: string): Promise<void> {
+  for (const tab of await groupTabs(await info(id))) {
+    await overlay.remove(tab.id!);
+    await cdp.detach(tab.id!);
+  }
+}
+
+/** Encerra a sessão por completo e devolve as abas ao usuário, fora do grupo. */
+export async function release(id: string): Promise<void> {
+  const s = await forget(id);
+  const tabs = await groupTabs(s);
+  for (const tab of tabs) {
+    await overlay.remove(tab.id!);
+    await cdp.detach(tab.id!);
+  }
+  const ids = tabs.map((t) => t.id!);
+  if (ids.length) await chrome.tabs.ungroup(ids as [number, ...number[]]).catch(() => {});
+}
+
+/** Novo native host = sessões MCP antigas não existem mais (o chat embutido não depende do host). */
 export async function reset(): Promise<void> {
   const store = await load();
-  await Promise.all(Object.keys(store).map(close));
+  await Promise.all(Object.keys(store).filter((id) => id !== CHAT_SESSION).map(close));
 }

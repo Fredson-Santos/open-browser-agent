@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,7 +135,9 @@ func Probe() error {
 }
 
 // Call executa uma ferramenta na extensão e devolve o resultado MCP bruto.
-func (h *hubClient) Call(tool string, args json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
+// Se ctx terminar antes (timeout ou cancelamento do agente), pede à extensão
+// que interrompa a ação, para ela não continuar sem ninguém esperando.
+func (h *hubClient) Call(ctx context.Context, tool string, args json.RawMessage) (json.RawMessage, error) {
 	h.mu.Lock()
 	conn, err := h.connect()
 	if err != nil {
@@ -161,10 +164,15 @@ func (h *hubClient) Call(tool string, args json.RawMessage, timeout time.Duratio
 			return nil, errors.New(m.Error)
 		}
 		return m.Result, nil
-	case <-time.After(timeout):
+	case <-ctx.Done():
 		h.mu.Lock()
 		delete(h.pending, id)
 		h.mu.Unlock()
-		return nil, fmt.Errorf("tempo esgotado após %s esperando o navegador", timeout)
+		b, _ := json.Marshal(wire.ClientMsg{Type: "cancel", ID: id})
+		conn.Write(append(b, '\n'))
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("tempo esgotado após %s esperando o navegador; a ação foi interrompida", CallTimeout)
+		}
+		return nil, ctx.Err()
 	}
 }

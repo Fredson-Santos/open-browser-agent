@@ -5,6 +5,7 @@
 // então não precisamos de offscreen keepalive neste transporte. O alarme só
 // reconecta caso o host não esteja instalado/rodando.
 
+import * as chat from "./chat";
 import * as overlay from "./overlay";
 import * as permissions from "./permissions";
 import * as sessions from "./sessions";
@@ -87,7 +88,7 @@ function connect(): void {
 async function handle(p: chrome.runtime.Port, msg: HostMessage): Promise<void> {
   switch (msg.type) {
     case "tool_request": {
-      const ctx = { session: msg.session ?? "?", client: msg.client ?? "agente" };
+      const ctx = { session: msg.session ?? "?", client: msg.client ?? "agente", call: msg.id };
       const result = await tools.run(msg.tool ?? "", ctx, msg.args ?? {});
       try {
         p.postMessage({ type: "tool_response", id: msg.id, result });
@@ -96,6 +97,9 @@ async function handle(p: chrome.runtime.Port, msg: HostMessage): Promise<void> {
       }
       break;
     }
+    case "tool_cancel":
+      if (msg.id) tools.abortCall(msg.id);
+      break;
     case "session_closed":
       if (msg.session) await sessions.close(msg.session);
       break;
@@ -111,14 +115,38 @@ type UiMessage =
   | { type: "OBA_STOP" | "OBA_RESUME" }
   | { type: "OBA_DECIDE"; id: string; decision: Decision }
   | { type: "OBA_SESSION"; session: string; stop: boolean }
-  | { type: "OBA_RECONNECT" };
+  | { type: "OBA_RECONNECT" }
+  | { type: "OBA_CHAT_BEGIN"; tabId: number }
+  | { type: "OBA_CHAT_TOOL"; name: string; args: Record<string, unknown> }
+  | { type: "OBA_CHAT_ABORT" }
+  | { type: "OBA_CHAT_END" | "OBA_CHAT_RELEASE" };
 
-// Mensagens do overlay (Parar/Retomar), da janela de aprovação e do side panel.
+// Mensagens do overlay (Parar/Retomar), da janela de aprovação e do side panel
+// (incluindo o chat embutido, que executa as ferramentas por aqui).
 // onMessage só recebe mensagens da própria extensão; páginas web não chegam aqui.
 chrome.runtime.onMessage.addListener((msg: UiMessage, sender, reply) => {
   if (sender.id !== chrome.runtime.id) return;
   void (async () => {
     switch (msg.type) {
+      case "OBA_CHAT_BEGIN":
+        try {
+          reply({ ok: true, tab: await chat.begin(msg.tabId) });
+        } catch (e) {
+          reply({ ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+        return;
+      case "OBA_CHAT_TOOL":
+        reply({ ok: true, result: await chat.run(msg.name, msg.args ?? {}) });
+        return;
+      case "OBA_CHAT_ABORT":
+        chat.abort();
+        break;
+      case "OBA_CHAT_END":
+        await chat.end();
+        break;
+      case "OBA_CHAT_RELEASE":
+        await chat.release();
+        break;
       case "OBA_STOP":
       case "OBA_RESUME": {
         const found = sender.tab && (await sessions.byGroup(sender.tab.groupId));
@@ -138,6 +166,19 @@ chrome.runtime.onMessage.addListener((msg: UiMessage, sender, reply) => {
     reply({ ok: true });
   })();
   return true;
+});
+
+// Cada side panel aberto (um por janela) mantém uma porta aberta: quando o
+// último fecha, o chat embutido para e as abas dele voltam ao usuário (fora do
+// grupo, sem depurador). Se só o service worker reiniciar, o painel reconecta
+// e nada é solto.
+let chatPanels = 0;
+chrome.runtime.onConnect.addListener((p) => {
+  if (p.name !== "oba-chat" || p.sender?.id !== chrome.runtime.id) return;
+  chatPanels++;
+  p.onDisconnect.addListener(() => {
+    if (--chatPanels === 0) void chat.release();
+  });
 });
 
 // Cada navegação apaga o overlay; recoloca nas abas que pertencem a um agente.

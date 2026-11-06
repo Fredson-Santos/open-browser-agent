@@ -55,6 +55,18 @@ button.small { padding: 4px 10px; font-size: 12px; }
 button.link { border: 0; background: none; padding: 2px 4px; color: var(--muted); font-weight: 500; }
 button.link:hover { color: var(--danger); }
 
+input[type="text"], input[type="url"], input[type="password"], textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  width: 100%;
+}
+input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+button:disabled { opacity: .55; cursor: default; }
+
 select {
   font: inherit;
   color: var(--text);

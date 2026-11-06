@@ -1,6 +1,8 @@
-// Side panel: status da conexão, agentes, permissões por site e log.
+// Side panel: o chat embutido é a tela principal (ui/chat.ts); a tela
+// "Conexão e permissões" mostra status do host, agentes, regras por site e log.
 // Lê tudo de chrome.storage e se redesenha quando algo muda.
 
+import * as chat from "./chat";
 import {
   type ClientGrant,
   DEFAULT_SETTINGS,
@@ -40,8 +42,8 @@ async function renderStatus() {
   $("status-detail").textContent = s.connected
     ? "Agentes MCP podem se conectar com \"oba mcp\"."
     : s.detail
-      ? `${s.detail}. Rode "oba install" e confira se o binário existe.`
-      : "Rode \"oba install\" para registrar o host.";
+      ? `${s.detail}. Rode "oba install" e confira se o binário existe. O chat embutido funciona sem o host.`
+      : "Necessário só para agentes MCP externos (rode \"oba install\"). O chat embutido funciona sem ele.";
   $("reconnect").hidden = s.connected;
 }
 
@@ -198,4 +200,5 @@ chrome.storage.onChanged.addListener((changes) => {
 chrome.tabs.onUpdated.addListener(() => void renderSessions());
 chrome.tabs.onRemoved.addListener(() => void renderSessions());
 
+void chat.init();
 void Promise.all([renderStatus(), renderSessions(), renderClients(), renderSites(), renderLog()]);

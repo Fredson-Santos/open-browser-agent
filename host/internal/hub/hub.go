@@ -173,10 +173,19 @@ func (h *Hub) serve(conn net.Conn) {
 
 	for sc.Scan() {
 		var m wire.ClientMsg
-		if json.Unmarshal(sc.Bytes(), &m) != nil || m.Type != "call" {
+		if json.Unmarshal(sc.Bytes(), &m) != nil {
 			continue
 		}
 		key := fmt.Sprintf("%s:%d", c.session, m.ID)
+		if m.Type == "cancel" {
+			// O cliente desistiu: a extensão interrompe a ação. A resposta de erro
+			// que ela ainda manda segue o caminho normal e o cliente a ignora.
+			h.ext.Send(wire.ExtMsg{Type: "tool_cancel", ID: key, Session: c.session})
+			continue
+		}
+		if m.Type != "call" {
+			continue
+		}
 		h.mu.Lock()
 		h.pending[key] = pending{c: c, id: m.ID}
 		h.mu.Unlock()

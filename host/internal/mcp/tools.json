@@ -1,0 +1,466 @@
+[
+  {
+    "name": "tabs_context",
+    "description": "Lista as abas do grupo desta sessão (cada agente tem seu próprio grupo de abas). Chame antes de qualquer outra ferramenta para obter IDs de aba válidos. Com create_if_empty=true, cria uma aba nova se o grupo estiver vazio.",
+    "inputSchema": {
+      "properties": {
+        "create_if_empty": {
+          "description": "Cria uma aba se não houver nenhuma no grupo.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "tabs_create",
+    "description": "Cria uma aba nova no grupo desta sessão, opcionalmente já abrindo uma URL.",
+    "inputSchema": {
+      "properties": {
+        "url": {
+          "description": "URL inicial (opcional).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "tabs_close",
+    "description": "Fecha uma aba do grupo desta sessão.",
+    "inputSchema": {
+      "properties": {
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "navigate",
+    "description": "Navega a aba para uma URL e espera o carregamento. Use \"back\", \"forward\" ou \"reload\" para controlar o histórico.",
+    "inputSchema": {
+      "properties": {
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "url": {
+          "description": "URL, ou back/forward/reload.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id",
+        "url"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "screenshot",
+    "description": "Captura a área visível da aba. A imagem é dimensionada em pixels CSS: as coordenadas dela podem ser usadas diretamente em computer.",
+    "inputSchema": {
+      "properties": {
+        "format": {
+          "description": "Padrão: jpeg.",
+          "enum": [
+            "jpeg",
+            "png"
+          ],
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_page",
+    "description": "Retorna a árvore de acessibilidade da página: uma linha por elemento no formato `role \"nome\" [ref_N]`. Use os refs em computer (ref) para clicar/digitar. filter=\"interactive\" lista só elementos clicáveis/editáveis (bem menor). Campos de senha e cartão aparecem como [value redacted]. Refs expiram quando a página muda.",
+    "inputSchema": {
+      "properties": {
+        "filter": {
+          "description": "Padrão: all.",
+          "enum": [
+            "all",
+            "interactive"
+          ],
+          "type": "string"
+        },
+        "max_depth": {
+          "description": "Profundidade máxima (padrão 25).",
+          "type": "integer"
+        },
+        "ref_id": {
+          "description": "Lê só a subárvore deste ref.",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "find",
+    "description": "Procura elementos pelo texto, rótulo, placeholder ou tipo (ex.: \"botão entrar\", \"campo de busca\", \"link preços\"). Retorna refs ordenados por relevância. Mais barato que read_page quando você sabe o que procura.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Máximo de resultados (padrão 20).",
+          "type": "integer"
+        },
+        "query": {
+          "description": "O que procurar.",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id",
+        "query"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_page_text",
+    "description": "Extrai o texto legível da página (prioriza <article>/<main>). Ideal para ler artigos e documentação.",
+    "inputSchema": {
+      "properties": {
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "computer",
+    "description": "Interage com a página usando mouse e teclado nativos. Alvo: ref (de read_page/find, preferível) ou coordinate [x, y] em pixels do screenshot.\nAções: left_click, right_click, middle_click, double_click, triple_click, hover, left_click_drag (start_coordinate → coordinate), type (text; clica no alvo antes, se houver), key (text: \"Enter\", \"ctrl+a\", \"shift+Tab\", sequências separadas por espaço como \"ctrl+a Delete\"), scroll (scroll_direction, scroll_amount), scroll_to (ref), wait (duration em segundos), screenshot.",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "enum": [
+            "left_click",
+            "right_click",
+            "middle_click",
+            "double_click",
+            "triple_click",
+            "hover",
+            "left_click_drag",
+            "type",
+            "key",
+            "scroll",
+            "scroll_to",
+            "wait",
+            "screenshot"
+          ],
+          "type": "string"
+        },
+        "coordinate": {
+          "description": "[x, y] em pixels do screenshot.",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "duration": {
+          "description": "Segundos para wait (máx. 30).",
+          "type": "number"
+        },
+        "modifiers": {
+          "description": "Modificadores no clique, ex.: \"ctrl\" ou \"shift+ctrl\".",
+          "type": "string"
+        },
+        "ref": {
+          "description": "Ref do elemento alvo (ex.: ref_12).",
+          "type": "string"
+        },
+        "repeat": {
+          "description": "Repetições para key (padrão 1).",
+          "type": "integer"
+        },
+        "scroll_amount": {
+          "description": "Passos de scroll (padrão 3).",
+          "type": "integer"
+        },
+        "scroll_direction": {
+          "enum": [
+            "up",
+            "down",
+            "left",
+            "right"
+          ],
+          "type": "string"
+        },
+        "start_coordinate": {
+          "description": "Início do arraste.",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "text": {
+          "description": "Texto para type, ou teclas para key.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "form_input",
+    "description": "Define o valor de um campo de formulário pelo ref, disparando os eventos que frameworks (React, Vue) esperam. Use para <select> (pelo texto ou value da opção; read_page lista as opções), checkbox/radio (true/false), campos de texto, data, número e áreas editáveis. Mais confiável que clicar em menus nativos, que não aparecem no screenshot.",
+    "inputSchema": {
+      "properties": {
+        "ref": {
+          "description": "Ref do campo.",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Texto, número, booleano (checkbox) ou lista de opções (select múltiplo)."
+        }
+      },
+      "required": [
+        "tab_id",
+        "ref",
+        "value"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "handle_dialog",
+    "description": "Responde a um diálogo nativo (alert, confirm, prompt) que bloqueia a página. Quando uma ação abre um diálogo, as outras ferramentas avisam e esperam por esta.",
+    "inputSchema": {
+      "properties": {
+        "accept": {
+          "description": "true = OK/Aceitar (padrão), false = Cancelar.",
+          "type": "boolean"
+        },
+        "prompt_text": {
+          "description": "Texto para um prompt().",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_console",
+    "description": "Lê as mensagens de console da aba (log, warn, error, exceções não tratadas, avisos do navegador). A captura começa quando o agente abre ou navega a aba.",
+    "inputSchema": {
+      "properties": {
+        "clear": {
+          "description": "Limpa o buffer depois de ler.",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "Máximo de mensagens (padrão 100, as mais recentes).",
+          "type": "integer"
+        },
+        "only_errors": {
+          "description": "Só erros e exceções.",
+          "type": "boolean"
+        },
+        "pattern": {
+          "description": "Regex para filtrar texto ou URL.",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_network",
+    "description": "Lista as requisições HTTP da aba (XHR/fetch/documentos; imagens/fontes/CSS só com include_static) com método, status, tipo e tamanho. Com request_id, retorna o corpo da resposta.",
+    "inputSchema": {
+      "properties": {
+        "clear": {
+          "description": "Limpa o buffer depois de ler.",
+          "type": "boolean"
+        },
+        "include_static": {
+          "description": "Inclui imagens, fontes, CSS e mídia.",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "Máximo de requisições (padrão 50, as mais recentes).",
+          "type": "integer"
+        },
+        "only_errors": {
+          "description": "Só falhas e status >= 400.",
+          "type": "boolean"
+        },
+        "request_id": {
+          "description": "Lê o corpo da resposta desta requisição.",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "url_pattern": {
+          "description": "Filtra URLs que contêm este texto.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "file_upload",
+    "description": "Anexa arquivos locais a um campo <input type=\"file\"> (ou ao botão/rótulo que o contém). Não clique no botão de upload: isso abre o seletor do sistema. O usuário confirma cada envio.",
+    "inputSchema": {
+      "properties": {
+        "paths": {
+          "description": "Caminhos absolutos dos arquivos.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ref": {
+          "description": "Ref do campo de arquivo ou do botão de upload.",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id",
+        "ref",
+        "paths"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "gif_creator",
+    "description": "Grava as ações do agente na aba como GIF: start, faça as ações, stop (opcional) e export. Cada clique, digitação, navegação ou scroll vira um quadro, com o ponto do clique destacado. O arquivo vai para Downloads/oba.",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "enum": [
+            "start",
+            "stop",
+            "export",
+            "clear"
+          ],
+          "type": "string"
+        },
+        "filename": {
+          "description": "Nome do arquivo no export (opcional).",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "javascript",
+    "description": "Executa JavaScript no contexto da página (corpo de função async; use return para devolver um valor). Desativado por padrão: o usuário precisa ativar no painel do OBA. Prefira as outras ferramentas.",
+    "inputSchema": {
+      "properties": {
+        "code": {
+          "description": "Ex.: return document.querySelectorAll('tr').length",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id",
+        "code"
+      ],
+      "type": "object"
+    }
+  }
+]

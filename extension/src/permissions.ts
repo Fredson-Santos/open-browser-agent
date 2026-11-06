@@ -127,7 +127,7 @@ export async function checkSite(session: string, client: string, url: string | u
     rules[site] = "allow";
     await chrome.storage.local.set({ [K.sites]: rules });
   } else if (d === "session") {
-    await sessions.patch(session, client, { sites: [...(s?.sites ?? []), site] });
+    await sessions.addSite(session, client, site);
   } else if (d === "timeout") {
     throw new Error(NO_ANSWER);
   } else if (d === "dismissed") {

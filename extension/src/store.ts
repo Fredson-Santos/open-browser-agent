@@ -16,6 +16,14 @@ export const K = {
   log: "oba.log",
   /** session: estado da conexão com o native host */
   host: "oba.host",
+  /** local: provedor/modelo do chat embutido */
+  chatConfig: "oba.chat.config",
+  /** local: índice das conversas do chat ({ id, title, updated }[]) */
+  convIndex: "oba.convs",
+  /** local: conversa aberta no chat */
+  convActive: "oba.convs.active",
+  /** local: prefixo de cada conversa (oba.conv.<id>) */
+  convPrefix: "oba.conv.",
 } as const;
 
 export type ClientGrant = { approvedAt: number };
@@ -53,6 +61,33 @@ export type SessionView = {
   denied?: boolean;
   sites?: string[];
 };
+
+/** Chat embutido: qualquer API compatível com OpenAI (NVIDIA, OpenRouter, Ollama…). */
+export type ChatConfig = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  /** envia screenshots ao modelo (só funciona com modelos com visão) */
+  vision: boolean;
+  /** limite de chamadas ao modelo por pedido */
+  maxSteps: number;
+};
+export const DEFAULT_CHAT_CONFIG: ChatConfig = {
+  baseUrl: "https://integrate.api.nvidia.com/v1",
+  apiKey: "",
+  model: "meta/llama-3.3-70b-instruct",
+  vision: false,
+  maxSteps: 30,
+};
+
+/** O que o side panel mostra da conversa (o histórico do modelo fica à parte). */
+export type ChatItem =
+  | { kind: "user" | "assistant" | "note" | "error"; text: string; t: number }
+  | { kind: "tool"; tool: string; detail: string; ok?: boolean; error?: string; t: number };
+
+/** Sessão e nome usados pelo chat embutido nas ferramentas e no grupo de abas. */
+export const CHAT_SESSION = "chat";
+export const CHAT_CLIENT = "Chat OBA";
 
 export async function getLocal<T>(key: string, fallback: T): Promise<T> {
   const data = await chrome.storage.local.get(key);
