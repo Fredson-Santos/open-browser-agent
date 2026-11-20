@@ -403,7 +403,7 @@
   },
   {
     "name": "read_network",
-    "description": "Lista as requisições HTTP da aba (XHR/fetch/documentos; imagens/fontes/CSS só com include_static) com método, status, tipo e tamanho. Com request_id, retorna o corpo da resposta.",
+    "description": "Lista as requisições HTTP da aba (XHR/fetch/documentos; imagens/fontes/CSS só com include_static) com método, status, tipo e tamanho. Com request_id, retorna a troca HTTP completa (request line, request headers, request body/postData, redirects, status, response headers e response body).",
     "inputSchema": {
       "properties": {
         "clear": {
@@ -418,12 +418,16 @@
           "description": "Máximo de requisições (padrão 50, as mais recentes).",
           "type": "integer"
         },
+        "max_body_chars": {
+          "description": "Máximo de caracteres exibidos no corpo da requisição/resposta (padrão 20000, máx. 256000).",
+          "type": "integer"
+        },
         "only_errors": {
           "description": "Só falhas e status >= 400.",
           "type": "boolean"
         },
         "request_id": {
-          "description": "Lê o corpo da resposta desta requisição.",
+          "description": "Retorna a troca HTTP completa (request/response headers e body) desta requisição.",
           "type": "string"
         },
         "tab_id": {
@@ -557,6 +561,353 @@
       },
       "required": [
         "actions"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "cookies",
+    "description": "Gerencia cookies da aba via CDP (inclui cookies HttpOnly e Secure que JavaScript não enxerga). Ações: list (lista cookies da URL/aba atual ou all=true), get (busca por name exato), set (cria/altera cookie com flags http_only, secure, same_site, expires), delete (remove por name), clear (limpa cookies do site atual ou todos com all=true).",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "description": "Operação de cookies.",
+          "enum": [
+            "list",
+            "get",
+            "set",
+            "delete",
+            "clear"
+          ],
+          "type": "string"
+        },
+        "all": {
+          "description": "Para list/clear: opera sobre todos os cookies do perfil do navegador em vez de apenas os da aba/URL atual.",
+          "type": "boolean"
+        },
+        "domain": {
+          "description": "Domínio do cookie (para set/delete; ex.: .exemplo.com).",
+          "type": "string"
+        },
+        "expires": {
+          "description": "Timestamp Unix em segundos de expiração (para set; omitir = cookie de sessão).",
+          "type": "number"
+        },
+        "http_only": {
+          "description": "Marca o cookie como HttpOnly (para set).",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Nome do cookie (exato em get/set/delete; filtro substring em list).",
+          "type": "string"
+        },
+        "path": {
+          "description": "Caminho do cookie (para set/delete; padrão \"/\").",
+          "type": "string"
+        },
+        "same_site": {
+          "description": "Política SameSite (para set).",
+          "enum": [
+            "Strict",
+            "Lax",
+            "None"
+          ],
+          "type": "string"
+        },
+        "secure": {
+          "description": "Marca o cookie como Secure (para set; padrão true quando same_site=\"None\").",
+          "type": "boolean"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "url": {
+          "description": "URL alvo (opcional; padrão = URL atual da aba).",
+          "type": "string"
+        },
+        "value": {
+          "description": "Valor do cookie (obrigatório em set).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "storage",
+    "description": "Lê, edita ou limpa localStorage e sessionStorage da origem atual da aba (tokens JWT, chaves de sessão, preferências).",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "description": "Operação no storage.",
+          "enum": [
+            "list",
+            "get",
+            "set",
+            "delete",
+            "clear"
+          ],
+          "type": "string"
+        },
+        "key": {
+          "description": "Chave do item (obrigatória em get/set/delete; filtro substring opcional em list).",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "type": {
+          "description": "Qual storage usar: local, session ou both (padrão: both em list, local nas demais ações).",
+          "enum": [
+            "local",
+            "session",
+            "both"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "description": "Valor a gravar (obrigatório em set).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "http_headers",
+    "description": "Define ou remove cabeçalhos HTTP persistentes e/ou User-Agent customizado em todas as requisições da aba via CDP (útil para Authorization, X-Forwarded-For, X-Original-URL, bypass de WAF/IP).",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "description": "set (aplica headers/user_agent), list (mostra ativos) ou clear (remove todos e restaura User-Agent padrão).",
+          "enum": [
+            "set",
+            "list",
+            "clear"
+          ],
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Mapa de headers {Nome: Valor} para adicionar ou sobrescrever.",
+          "type": "object"
+        },
+        "remove": {
+          "description": "Lista de nomes de headers extras a remover (case-insensitive).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "replace": {
+          "description": "Se true, substitui todos os headers extras anteriores pelos fornecidos em headers (padrão false = mescla).",
+          "type": "boolean"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "user_agent": {
+          "description": "User-Agent customizado para a aba (string vazia \"\" restaura o padrão do navegador).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "intercept_rules",
+    "description": "Proxy interceptador estilo Burp Match & Replace / Block em tempo real via CDP Fetch. Permite criar regras por aba para alterar URL/método/headers/body em Request ou alterar status (ex.: 403→200), headers e body (ex.: \"admin\":false→true) em Response, além de capturar corpos de resposta com confiabilidade.",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "description": "Operação sobre as regras da aba.",
+          "enum": [
+            "add",
+            "list",
+            "remove",
+            "clear"
+          ],
+          "type": "string"
+        },
+        "block": {
+          "description": "Se true (stage=Request), bloqueia a requisição.",
+          "type": "boolean"
+        },
+        "find": {
+          "description": "Atalho para substituir texto no corpo (junto com replace/regex) sem precisar montar array replace_body.",
+          "type": "string"
+        },
+        "method": {
+          "description": "Filtra por método HTTP (ex.: GET, POST).",
+          "type": "string"
+        },
+        "override_body": {
+          "description": "Substitui o corpo inteiro da requisição (Request) ou resposta (Response).",
+          "type": "string"
+        },
+        "override_method": {
+          "description": "Altera o método HTTP (apenas stage=Request).",
+          "type": "string"
+        },
+        "override_status": {
+          "description": "Altera o status HTTP da resposta, ex.: 200 (apenas stage=Response).",
+          "type": "integer"
+        },
+        "override_status_text": {
+          "description": "Texto do status HTTP (opcional junto com override_status).",
+          "type": "string"
+        },
+        "override_url": {
+          "description": "Redireciona/altera a URL da requisição antes do envio (apenas stage=Request).",
+          "type": "string"
+        },
+        "regex": {
+          "description": "Usado com find/replace: interpreta find como expressão regular global.",
+          "type": "boolean"
+        },
+        "remove_headers": {
+          "description": "Lista de headers a remover (case-insensitive).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "replace": {
+          "description": "Texto substituto para o atalho find.",
+          "type": "string"
+        },
+        "replace_body": {
+          "description": "Lista de substituições {find, replace, regex?} aplicadas em ordem ao corpo.",
+          "items": {
+            "properties": {
+              "find": {
+                "type": "string"
+              },
+              "regex": {
+                "type": "boolean"
+              },
+              "replace": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "find",
+              "replace"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "description": "ID da regra a remover (obrigatório em action=remove).",
+          "type": "string"
+        },
+        "set_headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Headers {Nome: Valor} para adicionar ou sobrescrever.",
+          "type": "object"
+        },
+        "stage": {
+          "description": "Momento da interceptação: Request (antes de enviar) ou Response (antes da página receber).",
+          "enum": [
+            "Request",
+            "Response"
+          ],
+          "type": "string"
+        },
+        "status_filter": {
+          "description": "Filtra por status HTTP da resposta, ex.: 403 (apenas stage=Response).",
+          "type": "integer"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "url_pattern": {
+          "description": "Padrão de URL (glob com * e ?, ou substring; padrão \"*\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "http_repeater",
+    "description": "Estilo Burp Repeater: reenvia uma requisição capturada pelo read_network (via request_id) ou cria uma requisição do zero no contexto autenticado da aba (com cookies e sessão do navegador), permitindo modificar método, URL, headers e body.",
+    "inputSchema": {
+      "properties": {
+        "body": {
+          "description": "Corpo da requisição (substitui o postData original, se houver).",
+          "type": "string"
+        },
+        "follow_redirects": {
+          "description": "Se true (padrão), segue redirecionamentos; se false, retorna o primeiro salto 30x.",
+          "type": "boolean"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Headers {Nome: Valor} para adicionar ou sobrescrever na requisição.",
+          "type": "object"
+        },
+        "max_body_chars": {
+          "description": "Máximo de caracteres exibidos do corpo da resposta (padrão 20000, máx. 256000).",
+          "type": "integer"
+        },
+        "method": {
+          "description": "Método HTTP (GET, POST, PUT, PATCH, DELETE, etc.).",
+          "type": "string"
+        },
+        "remove_headers": {
+          "description": "Headers a remover dos clonados do request_id (case-insensitive).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "replace_headers": {
+          "description": "Se true, descarta os headers clonados do request_id e usa apenas os informados em headers.",
+          "type": "boolean"
+        },
+        "request_id": {
+          "description": "ID da requisição do read_network usada como base (opcional se url for informada).",
+          "type": "string"
+        },
+        "tab_id": {
+          "description": "ID da aba (obtido com tabs_context ou tabs_create).",
+          "type": "integer"
+        },
+        "url": {
+          "description": "URL alvo (obrigatória se request_id não for informado; caso contrário sobrescreve a URL original).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id"
       ],
       "type": "object"
     }

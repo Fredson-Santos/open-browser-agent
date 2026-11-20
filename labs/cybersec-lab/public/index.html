@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>OBA CyberSec Lab</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem; background: #0f1115; color: #e4e6eb; }
+  h1 { font-size: 1.4rem; }
+  section { border: 1px solid #2a2d35; border-radius: 8px; padding: 1rem; margin-bottom: 1.2rem; background: #161820; }
+  h2 { margin-top: 0; font-size: 1.05rem; }
+  p.goal { color: #9aa0ab; font-size: 0.9rem; }
+  button { background: #2563eb; color: white; border: none; padding: 0.5rem 0.9rem; border-radius: 6px; cursor: pointer; margin-right: 0.4rem; }
+  button:hover { background: #1d4ed8; }
+  input { background: #0f1115; border: 1px solid #2a2d35; color: #e4e6eb; padding: 0.4rem; border-radius: 6px; margin-right: 0.3rem; }
+  pre { background: #0b0c10; border: 1px solid #2a2d35; border-radius: 6px; padding: 0.7rem; overflow-x: auto; font-size: 0.82rem; white-space: pre-wrap; }
+  .flag { color: #22c55e; font-weight: bold; }
+  code { color: #f59e0b; }
+</style>
+</head>
+<body>
+  <h1>🧪 OBA CyberSec Lab</h1>
+  <p class="goal">Site local só para testar a Fase 3 (intercept_rules / http_repeater) do OBA. Nenhum dado real, nenhuma rede externa.</p>
+
+  <section>
+    <h2>1. Response body tampering — <code>/api/profile</code></h2>
+    <p class="goal">O servidor sempre devolve <code>"admin": false</code>. Meta: criar uma <code>intercept_rules</code> de Response que troque <code>"admin":false</code> por <code>"admin":true</code> no body, e ver o painel de admin aparecer aqui sem mexer no servidor.</p>
+    <button onclick="call('GET','/api/profile','profile')">Chamar /api/profile</button>
+    <pre id="profile">(aguardando)</pre>
+    <div id="adminPanel" style="display:none" class="flag">🔓 Painel de admin liberado (via interceptação do response body)</div>
+  </section>
+
+  <section>
+    <h2>2. Status code tampering — <code>/api/admin</code></h2>
+    <p class="goal">Sem o cookie <code>role=admin</code> a resposta é 403. Meta: criar uma regra que troque <code>403 → 200</code> nesta rota (ou usar a tool <code>cookies</code> da Fase 2 para setar o cookie direto — teste os dois caminhos).</p>
+    <button onclick="call('GET','/api/admin','admin')">Chamar /api/admin</button>
+    <pre id="admin">(aguardando)</pre>
+  </section>
+
+  <section>
+    <h2>3. Request header injection — <code>/api/internal</code></h2>
+    <p class="goal">Bloqueia (403) quem não parece vir de rede interna. Meta: regra de Request que injete <code>X-Forwarded-For: 10.0.0.5</code> antes de a requisição saber.</p>
+    <button onclick="call('GET','/api/internal','internal')">Chamar /api/internal</button>
+    <pre id="internal">(aguardando)</pre>
+  </section>
+
+  <section>
+    <h2>4. Captura para Repeater — login</h2>
+    <p class="goal">Logue como <code>guest/guest</code> (token sem privilégio). Depois use <code>read_network</code> para achar esta requisição e <code>http_repeater</code> para reemitir <code>/api/secret</code> trocando o token guest pelo token admin — ou faça login como <code>admin/admin123</code> em outra aba/sessão e repita o header Authorization capturado dali.</p>
+    <input id="user" placeholder="username" value="guest" />
+    <input id="pass" placeholder="password" value="guest" type="password" />
+    <button onclick="login()">Login</button>
+    <pre id="login">(aguardando)</pre>
+  </section>
+
+  <section>
+    <h2>5. Authorization reuse — <code>/api/secret</code></h2>
+    <p class="goal">Exige <code>Authorization: Bearer &lt;token admin&gt;</code>. Um token guest dá 403. Teste o <code>http_repeater</code> mutando o header Authorization de uma requisição capturada.</p>
+    <input id="token" placeholder="token (copie do login acima)" style="width: 320px" />
+    <button onclick="secret()">Chamar /api/secret</button>
+    <pre id="secret">(aguardando)</pre>
+  </section>
+
+  <section>
+    <h2>Utilitário</h2>
+    <button onclick="call('GET','/api/whoami','whoami')">Ver headers/cookies recebidos (/api/whoami)</button>
+    <button onclick="call('POST','/api/reset','reset')">Resetar tokens/sessões do lab</button>
+    <pre id="whoami">(aguardando)</pre>
+    <pre id="reset" style="display:none"></pre>
+  </section>
+
+<script>
+async function call(method, url, id) {
+  const r = await fetch(url, { method });
+  const text = await r.text();
+  document.getElementById(id).textContent = `HTTP ${r.status}\n` + text;
+  if (id === 'profile') {
+    try {
+      const body = JSON.parse(text);
+      document.getElementById('adminPanel').style.display = body.admin ? 'block' : 'none';
+    } catch {}
+  }
+}
+async function login() {
+  const username = document.getElementById('user').value;
+  const password = document.getElementById('pass').value;
+  const r = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const text = await r.text();
+  document.getElementById('login').textContent = `HTTP ${r.status}\n` + text;
+  try {
+    const body = JSON.parse(text);
+    if (body.token) document.getElementById('token').value = body.token;
+  } catch {}
+}
+async function secret() {
+  const token = document.getElementById('token').value;
+  const r = await fetch('/api/secret', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+  const text = await r.text();
+  document.getElementById('secret').textContent = `HTTP ${r.status}\n` + text;
+}
+</script>
+</body>
+</html>

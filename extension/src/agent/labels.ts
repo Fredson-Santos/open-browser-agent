@@ -80,6 +80,16 @@ export function describeTool(name: string, args: Args): string {
       return join("Gravação GIF:", str(args.action));
     case "javascript":
       return "Executar JavaScript";
+    case "cookies":
+      return join("Cookies:", str(args.action), str(args.name, 28));
+    case "storage":
+      return join("Storage:", str(args.action), str(args.key, 28));
+    case "http_headers":
+      return join("Headers HTTP:", str(args.action));
+    case "intercept_rules":
+      return join("Intercept:", str(args.action), str(args.url_pattern, 28));
+    case "http_repeater":
+      return join("Repeater:", str(args.method), host(args.url) || str(args.request_id, 18));
     default:
       return name;
   }

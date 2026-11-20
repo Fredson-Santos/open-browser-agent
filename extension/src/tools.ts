@@ -383,6 +383,27 @@ async function computerAction(tab: chrome.tabs.Tab, action: string, args: Args):
 
 // ---------------------------------------------------------------- registro
 
+const FORBIDDEN_FETCH_HEADERS = new Set([
+  "accept-charset", "accept-encoding", "access-control-request-headers", "access-control-request-method",
+  "connection", "content-length", "cookie", "cookie2", "date", "dnt", "expect", "host", "keep-alive",
+  "origin", "referer", "te", "trailer", "transfer-encoding", "upgrade", "user-agent", "via",
+]);
+
+function isForbiddenFetchHeader(name: string): boolean {
+  const low = name.toLowerCase();
+  return FORBIDDEN_FETCH_HEADERS.has(low) || low.startsWith("sec-") || low.startsWith("proxy-");
+}
+
+function formatHeaders(headers?: Record<string, string>): string[] {
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(headers ?? {})) {
+    for (const part of String(v).split(/\r?\n/)) {
+      lines.push(`${k}: ${part}`);
+    }
+  }
+  return lines;
+}
+
 const handlers: Record<string, Handler> = {
   async tabs_context(ctx, args) {
     let tabs = await sessions.listTabs(ctx.session, ctx.client);
@@ -564,14 +585,118 @@ const handlers: Record<string, Handler> = {
     const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
     const tabId = tab.id!;
     await cdp.track(tabId);
-    if (typeof args.request_id === "string") {
+    if (typeof args.request_id === "string" && args.request_id) {
       const entry = cdp.networkEntries(tabId).find((e) => e.id === args.request_id);
       if (!entry) throw new Error(`requisição ${args.request_id} não encontrada.`);
-      const body = await cdp.send<{ body: string; base64Encoded: boolean }>(tabId, "Network.getResponseBody", { requestId: args.request_id })
-        .catch((e) => { throw new Error(`corpo indisponível (${(e as Error).message}); só respostas ainda em memória podem ser lidas.`); });
-      if (body.base64Encoded) return text(`${entry.method} ${entry.url} → ${entry.status} ${entry.mimeType}: corpo binário (${Math.round(body.body.length * 0.75 / 1024)} KB), não exibido.`);
-      const max = 20_000;
-      return text(`${entry.method} ${entry.url} → ${entry.status} ${entry.mimeType}\n\n${body.body.slice(0, max)}${body.body.length > max ? `\n\n(truncado em ${max} caracteres de ${body.body.length})` : ""}`);
+      const maxBody = Math.min(
+        Math.max(typeof args.max_body_chars === "number" ? args.max_body_chars : 20_000, 1_000),
+        256_000,
+      );
+
+      if (entry.hasPostData && entry.postData === undefined) {
+        const post = await cdp
+          .send<{ postData?: string }>(tabId, "Network.getRequestPostData", { requestId: args.request_id })
+          .catch(() => undefined);
+        if (typeof post?.postData === "string") {
+          entry.postData = post.postData.slice(0, 256 * 1024);
+        }
+      }
+
+      let bodyText = entry.body;
+      let bodyBase64 = entry.bodyBase64;
+      let bodyBytes = entry.bodyBytes;
+      let bodyTruncated = entry.bodyTruncated ?? false;
+      let bodyErr = entry.bodyError;
+
+      if (bodyText === undefined && bodyBase64 === undefined) {
+        try {
+          const res = await cdp.send<{ body: string; base64Encoded: boolean }>(
+            tabId,
+            "Network.getResponseBody",
+            { requestId: args.request_id },
+          );
+          if (res.base64Encoded) {
+            bodyBase64 = true;
+            bodyBytes = Math.round(res.body.length * 0.75);
+          } else {
+            bodyBase64 = false;
+            bodyBytes = res.body.length;
+            if (res.body.length > 256 * 1024) {
+              bodyText = res.body.slice(0, 256 * 1024);
+              bodyTruncated = true;
+            } else {
+              bodyText = res.body;
+            }
+          }
+          entry.body = bodyText;
+          entry.bodyBase64 = bodyBase64;
+          entry.bodyBytes = bodyBytes;
+          entry.bodyTruncated = bodyTruncated;
+        } catch (e) {
+          bodyErr = (e as Error)?.message ?? String(e);
+        }
+      }
+
+      const out: string[] = [];
+      out.push("=== REQUEST ===");
+      out.push(`${entry.method} ${entry.url}`);
+      const reqHeaders = formatHeaders(entry.requestHeaders);
+      out.push(...(reqHeaders.length ? reqHeaders : ["(nenhum header capturado)"]));
+      if (entry.postData !== undefined) {
+        out.push("");
+        out.push(entry.postData.slice(0, maxBody));
+        if (entry.postData.length > maxBody) {
+          out.push(`\n(request body truncado em ${maxBody} caracteres de ${entry.postData.length})`);
+        }
+      } else if (entry.hasPostData) {
+        out.push("");
+        out.push("(request body indisponível no buffer CDP)");
+      }
+
+      if (entry.redirects?.length) {
+        out.push("");
+        out.push("=== REDIRECTS ===");
+        for (const [idx, hop] of entry.redirects.entries()) {
+          out.push(`-- Hop ${idx + 1}: ${hop.status}${hop.statusText ? ` ${hop.statusText}` : ""} ${hop.url}`);
+          const hopHeaders = formatHeaders(hop.responseHeaders);
+          out.push(...(hopHeaders.length ? hopHeaders : ["(sem headers)"]));
+        }
+      }
+
+      out.push("");
+      out.push("=== RESPONSE ===");
+      if (entry.error) {
+        out.push(`ERRO: ${entry.error}`);
+      } else if (entry.status !== undefined) {
+        const proto = entry.protocol ? entry.protocol.toUpperCase() : "HTTP";
+        out.push(
+          `${proto} ${entry.status}${entry.statusText ? ` ${entry.statusText}` : ""}${entry.mimeType ? ` (${entry.mimeType})` : ""}`,
+        );
+      } else {
+        out.push("(pendente)");
+      }
+      const respHeaders = formatHeaders(entry.responseHeaders);
+      out.push(...(respHeaders.length ? respHeaders : ["(nenhum header capturado)"]));
+      out.push("");
+      if (bodyBase64) {
+        out.push(
+          `(corpo binário: ${Math.max(1, Math.round((bodyBytes ?? 0) / 1024))} KB, ${entry.mimeType ?? "unknown"})`,
+        );
+      } else if (typeof bodyText === "string") {
+        if (bodyText.length === 0) {
+          out.push("(sem corpo)");
+        } else {
+          out.push(bodyText.slice(0, maxBody));
+          if (bodyText.length > maxBody || bodyTruncated) {
+            const total = bodyBytes ?? bodyText.length;
+            out.push(`\n(response body truncado em ${Math.min(maxBody, bodyText.length)} caracteres de ${total})`);
+          }
+        }
+      } else {
+        out.push(`(corpo indisponível: ${bodyErr ?? "buffer CDP descartado ou sem corpo"})`);
+      }
+
+      return text(out.join("\n"));
     }
     let list = cdp.networkEntries(tabId);
     if (typeof args.url_pattern === "string" && args.url_pattern) list = list.filter((e) => e.url.includes(args.url_pattern as string));
@@ -587,7 +712,7 @@ const handlers: Record<string, Handler> = {
       const url = e.url.length > 160 ? e.url.slice(0, 159) + "…" : e.url;
       return `${e.method} ${status} ${e.type ?? ""}${size} ${url}  [id ${e.id}]`;
     });
-    return text(`${shown.length} de ${list.length} requisição(ões) (use request_id para ler o corpo):\n${lines.join("\n")}`);
+    return text(`${shown.length} de ${list.length} requisição(ões) (use request_id para ver a troca HTTP completa: request/response headers e body):\n${lines.join("\n")}`);
   },
 
   async file_upload(ctx, args) {
@@ -663,6 +788,615 @@ const handlers: Record<string, Handler> = {
     const out = v === undefined ? "(undefined — use return para devolver um valor)" : typeof v === "string" ? v : JSON.stringify(v, null, 2);
     return text(out.length > 20_000 ? out.slice(0, 20_000) + "\n(truncado)" : out);
   },
+
+  async cookies(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    const action = String(args.action ?? "").trim().toLowerCase();
+    const defaultHttpUrl = () =>
+      typeof args.url === "string" && args.url.trim()
+        ? args.url.trim()
+        : tab.url && /^https?:\/\//i.test(tab.url)
+          ? tab.url
+          : undefined;
+    const urlArg = typeof args.url === "string" && args.url.trim() ? args.url.trim() : undefined;
+
+    switch (action) {
+      case "list": {
+        const list = await cdp.getCookies(tabId, {
+          all: args.all === true,
+          urls: urlArg ? [urlArg] : undefined,
+        });
+        const filter = typeof args.name === "string" ? args.name.trim().toLowerCase() : "";
+        const filtered = filter ? list.filter((c) => c.name.toLowerCase().includes(filter)) : list;
+        if (filtered.length === 0) return text("Nenhum cookie encontrado.");
+        const formatted = JSON.stringify(
+          filtered.map((c) => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path,
+            httpOnly: c.httpOnly,
+            secure: c.secure,
+            sameSite: c.sameSite,
+            session: c.session,
+            expires: c.expires,
+          })),
+          null,
+          2,
+        );
+        const body = formatted.length > 20_000 ? formatted.slice(0, 20_000) + "\n(truncado; filtre por name ou url)" : formatted;
+        return text(`${filtered.length} cookie(s):\n${body}`);
+      }
+
+      case "get": {
+        const name = typeof args.name === "string" ? args.name.trim() : "";
+        if (!name) throw new Error("name é obrigatório para action=get.");
+        const list = await cdp.getCookies(tabId, {
+          all: args.all === true,
+          urls: urlArg ? [urlArg] : undefined,
+        });
+        const matches = list.filter((c) => c.name === name);
+        if (matches.length === 0) return text(`Cookie "${name}" não encontrado.`);
+        const formatted = JSON.stringify(matches, null, 2);
+        return text(formatted.length > 20_000 ? formatted.slice(0, 20_000) + "\n(truncado)" : formatted);
+      }
+
+      case "set": {
+        const name = typeof args.name === "string" ? args.name.trim() : "";
+        if (!name) throw new Error("name é obrigatório para action=set.");
+        if (args.value === undefined || args.value === null) throw new Error("value é obrigatório para action=set.");
+        const value = String(args.value);
+        const domain = typeof args.domain === "string" && args.domain.trim() ? args.domain.trim() : undefined;
+        let url = urlArg;
+        if (!url && !domain) url = defaultHttpUrl();
+        if (!url && !domain) throw new Error("informe url ou domain (a aba atual não está em http/https).");
+
+        let sameSite: "Strict" | "Lax" | "None" | undefined;
+        if (args.same_site !== undefined) {
+          const raw = String(args.same_site).trim().toLowerCase();
+          if (raw === "strict") sameSite = "Strict";
+          else if (raw === "lax") sameSite = "Lax";
+          else if (raw === "none") sameSite = "None";
+          else throw new Error('same_site deve ser "Strict", "Lax" ou "None".');
+        }
+
+        const secure = typeof args.secure === "boolean" ? args.secure : sameSite === "None" ? true : undefined;
+        const httpOnly = typeof args.http_only === "boolean" ? args.http_only : undefined;
+        const path = typeof args.path === "string" && args.path.trim() ? args.path.trim() : undefined;
+        const expires = typeof args.expires === "number" && Number.isFinite(args.expires) ? args.expires : undefined;
+
+        const ok = await cdp.setCookie(tabId, {
+          name,
+          value,
+          url,
+          domain,
+          path,
+          secure,
+          httpOnly,
+          sameSite,
+          expires,
+        });
+        if (!ok) {
+          throw new Error(`falha ao definir cookie "${name}"; verifique domain/url e flags secure/same_site.`);
+        }
+        const flags = [
+          httpOnly ? "HttpOnly" : "",
+          secure ? "Secure" : "",
+          sameSite ? `SameSite=${sameSite}` : "",
+        ]
+          .filter(Boolean)
+          .join(", ");
+        return text(`Cookie "${name}" definido para ${domain ?? url}${flags ? ` (${flags})` : ""}.`);
+      }
+
+      case "delete": {
+        const name = typeof args.name === "string" ? args.name.trim() : "";
+        if (!name) throw new Error("name é obrigatório para action=delete.");
+        const domain = typeof args.domain === "string" && args.domain.trim() ? args.domain.trim() : undefined;
+        const path = typeof args.path === "string" && args.path.trim() ? args.path.trim() : undefined;
+        let url = urlArg;
+        if (!url && !domain) url = defaultHttpUrl();
+        if (!url && !domain) throw new Error("informe url ou domain (a aba atual não está em http/https).");
+        await cdp.deleteCookies(tabId, { name, url, domain, path });
+        return text(`Cookie "${name}" removido de ${domain ?? url}.`);
+      }
+
+      case "clear": {
+        if (args.all === true) {
+          await cdp.clearAllCookies(tabId);
+          return text("Todos os cookies do navegador foram removidos.");
+        }
+        const targetUrl = defaultHttpUrl();
+        const list = await cdp.getCookies(tabId, { urls: targetUrl ? [targetUrl] : undefined });
+        for (const c of list) {
+          await cdp.deleteCookies(tabId, { name: c.name, domain: c.domain, path: c.path });
+        }
+        return text(`${list.length} cookie(s) removido(s) de ${targetUrl ?? "aba atual"}.`);
+      }
+
+      default:
+        throw new Error('action deve ser "list", "get", "set", "delete" ou "clear".');
+    }
+  },
+
+  async storage(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    if (cdp.isRestricted(tab.url)) {
+      throw new Error(`o navegador não permite ler/editar storage em ${tab.url}.`);
+    }
+    const d = cdp.pendingDialog(tabId);
+    if (d) throw cdp.dialogError(d);
+
+    const action = String(args.action ?? "").trim().toLowerCase() as cdp.StorageAction;
+    if (!["list", "get", "set", "delete", "clear"].includes(action)) {
+      throw new Error('action deve ser "list", "get", "set", "delete" ou "clear".');
+    }
+    const rawType = args.type === undefined ? (action === "list" ? "both" : "local") : String(args.type).trim().toLowerCase();
+    if (!["local", "session", "both"].includes(rawType)) {
+      throw new Error('type deve ser "local", "session" ou "both".');
+    }
+    const type = rawType as cdp.StorageScope;
+    if (action === "set" && type === "both") {
+      throw new Error('para action=set, informe type="local" ou "session".');
+    }
+
+    const key = typeof args.key === "string" ? args.key : undefined;
+    if ((action === "get" || action === "set" || action === "delete") && !key) {
+      throw new Error(`key é obrigatório para action=${action}.`);
+    }
+    if (action === "set" && (args.value === undefined || args.value === null)) {
+      throw new Error("value é obrigatório para action=set.");
+    }
+    const value = args.value !== undefined && args.value !== null ? String(args.value) : undefined;
+    const res = await cdp.execStorage(tabId, { action, type, key, value });
+    const out = JSON.stringify(res, null, 2);
+    return text(out.length > 20_000 ? out.slice(0, 20_000) + "\n(truncado)" : out);
+  },
+
+  async http_headers(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    const action = String(args.action ?? "").trim().toLowerCase();
+
+    switch (action) {
+      case "list": {
+        const st = cdp.getTabHeaders(tabId);
+        if (Object.keys(st.headers).length === 0 && st.userAgent === undefined) {
+          return text("Nenhum header extra ou User-Agent customizado ativo nesta aba.");
+        }
+        return text(JSON.stringify(st, null, 2));
+      }
+
+      case "clear": {
+        await cdp.clearTabHeaders(tabId);
+        return text("Headers extras e User-Agent customizado removidos desta aba.");
+      }
+
+      case "set": {
+        let headers: Record<string, string> | undefined;
+        if (args.headers !== undefined) {
+          if (typeof args.headers !== "object" || args.headers === null || Array.isArray(args.headers)) {
+            throw new Error("headers deve ser um objeto {Nome: Valor}.");
+          }
+          headers = {};
+          for (const [k, v] of Object.entries(args.headers as Record<string, unknown>)) {
+            if (!k.trim() || k.startsWith(":")) continue;
+            if (v === undefined || v === null) continue;
+            headers[k] = String(v);
+          }
+        }
+        const remove = Array.isArray(args.remove) ? args.remove.map(String).filter(Boolean) : undefined;
+        const replace = args.replace === true;
+        const userAgent = typeof args.user_agent === "string" ? args.user_agent : undefined;
+        if (headers === undefined && !remove?.length && !replace && userAgent === undefined) {
+          throw new Error("informe headers, remove, replace=true ou user_agent para action=set.");
+        }
+        const st = await cdp.setTabHeaders(tabId, { headers, remove, replace, userAgent });
+        return text(`Configuração de headers aplicada na aba ${tabId}:\n${JSON.stringify(st, null, 2)}`);
+      }
+
+      default:
+        throw new Error('action deve ser "set", "list" ou "clear".');
+    }
+  },
+
+  async intercept_rules(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    const action = String(args.action ?? "").trim().toLowerCase();
+
+    switch (action) {
+      case "list": {
+        const rules = cdp.listInterceptRules(tabId);
+        if (rules.length === 0) return text("Nenhuma regra de interceptação ativa nesta aba.");
+        return text(`${rules.length} regra(s) ativa(s):\n${JSON.stringify(rules, null, 2)}`);
+      }
+
+      case "remove": {
+        const ruleId = typeof args.rule_id === "string" ? args.rule_id.trim() : "";
+        if (!ruleId) throw new Error("rule_id é obrigatório para action=remove.");
+        const removed = await cdp.removeInterceptRule(tabId, ruleId);
+        return text(removed ? `Regra ${ruleId} removida.` : `Regra ${ruleId} não encontrada nesta aba.`);
+      }
+
+      case "clear": {
+        const count = await cdp.clearInterceptRules(tabId);
+        return text(`${count} regra(s) de interceptação removida(s) da aba ${tabId}.`);
+      }
+
+      case "add": {
+        let stage: "Request" | "Response" | undefined;
+        if (args.stage !== undefined) {
+          const rawStage = String(args.stage).trim().toLowerCase();
+          if (rawStage === "request") stage = "Request";
+          else if (rawStage === "response") stage = "Response";
+          else throw new Error('stage deve ser "Request" ou "Response".');
+        } else if (args.override_status !== undefined || args.status_filter !== undefined) {
+          stage = "Response";
+        } else if (args.block === true || args.override_url !== undefined || args.override_method !== undefined) {
+          stage = "Request";
+        } else {
+          throw new Error('stage ("Request" ou "Response") é obrigatório para action=add.');
+        }
+
+        const block = args.block === true;
+        if (block && stage !== "Request") {
+          throw new Error('block=true só é suportado em stage="Request".');
+        }
+
+        let statusFilter: number | undefined;
+        if (args.status_filter !== undefined) {
+          if (stage !== "Response") throw new Error('status_filter só é válido em stage="Response".');
+          if (typeof args.status_filter !== "number" || !Number.isInteger(args.status_filter)) {
+            throw new Error("status_filter deve ser um número inteiro.");
+          }
+          statusFilter = args.status_filter;
+        }
+
+        let overrideStatus: number | undefined;
+        if (args.override_status !== undefined) {
+          if (stage !== "Response") throw new Error('override_status só é válido em stage="Response".');
+          if (
+            typeof args.override_status !== "number" ||
+            !Number.isInteger(args.override_status) ||
+            args.override_status < 100 ||
+            args.override_status > 599
+          ) {
+            throw new Error("override_status deve ser um inteiro entre 100 e 599.");
+          }
+          overrideStatus = args.override_status;
+        }
+
+        const overrideUrl = typeof args.override_url === "string" && args.override_url.trim() ? args.override_url.trim() : undefined;
+        if (overrideUrl && stage !== "Request") throw new Error('override_url só é válido em stage="Request".');
+
+        const overrideMethod =
+          typeof args.override_method === "string" && args.override_method.trim()
+            ? args.override_method.trim().toUpperCase()
+            : undefined;
+        if (overrideMethod && stage !== "Request") throw new Error('override_method só é válido em stage="Request".');
+
+        let setHeaders: Record<string, string> | undefined;
+        if (args.set_headers !== undefined) {
+          if (typeof args.set_headers !== "object" || args.set_headers === null || Array.isArray(args.set_headers)) {
+            throw new Error("set_headers deve ser um objeto {Nome: Valor}.");
+          }
+          setHeaders = {};
+          for (const [k, v] of Object.entries(args.set_headers as Record<string, unknown>)) {
+            if (!k.trim() || k.startsWith(":") || v === undefined || v === null) continue;
+            setHeaders[k] = String(v);
+          }
+        }
+
+        const removeHeaders = Array.isArray(args.remove_headers) ? args.remove_headers.map(String).filter(Boolean) : undefined;
+        const overrideBody = typeof args.override_body === "string" ? args.override_body : undefined;
+
+        let replaceBody: cdp.BodyReplacement[] | undefined;
+        if (args.replace_body !== undefined) {
+          if (!Array.isArray(args.replace_body)) throw new Error("replace_body deve ser uma lista de {find, replace, regex?}.");
+          replaceBody = args.replace_body.map((item) => {
+            const o = (item ?? {}) as Record<string, unknown>;
+            if (typeof o.find !== "string" || o.find === "" || o.replace === undefined) {
+              throw new Error("cada item de replace_body exige find (não vazio) e replace.");
+            }
+            return { find: o.find, replace: String(o.replace), regex: o.regex === true };
+          });
+        }
+        if (typeof args.find === "string" && args.find !== "") {
+          if (args.replace === undefined) throw new Error("replace é obrigatório ao usar o atalho find.");
+          replaceBody = [...(replaceBody ?? []), { find: args.find, replace: String(args.replace), regex: args.regex === true }];
+        }
+
+        const rule = await cdp.addInterceptRule(tabId, {
+          stage,
+          urlPattern: typeof args.url_pattern === "string" ? args.url_pattern : undefined,
+          method: typeof args.method === "string" && args.method.trim() ? args.method.trim().toUpperCase() : undefined,
+          statusFilter,
+          block,
+          overrideUrl,
+          overrideMethod,
+          overrideStatus,
+          overrideStatusText: typeof args.override_status_text === "string" ? args.override_status_text : undefined,
+          setHeaders,
+          removeHeaders,
+          overrideBody,
+          replaceBody,
+        });
+        return text(`Regra ${rule.id} ativada na aba ${tabId}:\n${JSON.stringify(rule, null, 2)}`);
+      }
+
+      default:
+        throw new Error('action deve ser "add", "list", "remove" ou "clear".');
+    }
+  },
+
+  async http_repeater(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const tabId = tab.id!;
+    await cdp.track(tabId);
+
+    const maxBody = Math.min(
+      Math.max(typeof args.max_body_chars === "number" ? args.max_body_chars : 20_000, 1_000),
+      256_000,
+    );
+    const followRedirects = args.follow_redirects !== false;
+
+    let method = "GET";
+    let rawUrl = "";
+    let clonedHeaders: Record<string, string> = {};
+    let body: string | undefined;
+
+    if (typeof args.request_id === "string" && args.request_id) {
+      const entry = cdp.networkEntries(tabId).find((e) => e.id === args.request_id);
+      if (!entry) throw new Error(`requisição ${args.request_id} não encontrada.`);
+      if (entry.hasPostData && entry.postData === undefined) {
+        const post = await cdp
+          .send<{ postData?: string }>(tabId, "Network.getRequestPostData", { requestId: args.request_id })
+          .catch(() => undefined);
+        if (typeof post?.postData === "string") entry.postData = post.postData.slice(0, 256 * 1024);
+      }
+      method = entry.method.toUpperCase();
+      rawUrl = entry.url;
+      clonedHeaders = args.replace_headers === true ? {} : { ...(entry.requestHeaders ?? {}) };
+      body = entry.postData;
+    }
+
+    if (typeof args.url === "string" && args.url.trim()) {
+      rawUrl = normalizeUrl(args.url);
+    }
+    if (!rawUrl) throw new Error("informe request_id ou url.");
+    let targetUrl: string;
+    try {
+      targetUrl = new URL(rawUrl).href;
+    } catch {
+      throw new Error(`URL inválida: ${rawUrl}`);
+    }
+
+    if (typeof args.method === "string" && args.method.trim()) {
+      method = args.method.trim().toUpperCase();
+    }
+    if (args.body !== undefined && args.body !== null) {
+      body = String(args.body);
+    }
+
+    const removeSet = new Set(
+      (Array.isArray(args.remove_headers) ? args.remove_headers.map(String).filter(Boolean) : []).map((k) =>
+        k.toLowerCase(),
+      ),
+    );
+    const mergedHeaders: Record<string, string> = {};
+    const lowerMap = new Map<string, string>();
+    for (const [k, v] of Object.entries(clonedHeaders)) {
+      const low = k.toLowerCase();
+      if (k.startsWith(":") || removeSet.has(low)) continue;
+      const prevKey = lowerMap.get(low);
+      if (prevKey && prevKey !== k) delete mergedHeaders[prevKey];
+      lowerMap.set(low, k);
+      mergedHeaders[k] = v;
+    }
+
+    const explicitHeaders: Record<string, string> = {};
+    if (args.headers !== undefined) {
+      if (typeof args.headers !== "object" || args.headers === null || Array.isArray(args.headers)) {
+        throw new Error("headers deve ser um objeto {Nome: Valor}.");
+      }
+      for (const [k, v] of Object.entries(args.headers as Record<string, unknown>)) {
+        if (!k.trim() || k.startsWith(":") || v === undefined || v === null) continue;
+        const val = String(v);
+        explicitHeaders[k] = val;
+        const low = k.toLowerCase();
+        const prevKey = lowerMap.get(low);
+        if (prevKey && prevKey !== k) delete mergedHeaders[prevKey];
+        lowerMap.set(low, k);
+        mergedHeaders[k] = val;
+      }
+    }
+
+    const jsHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(mergedHeaders)) {
+      if (!isForbiddenFetchHeader(k)) jsHeaders[k] = v;
+    }
+    const cdpForcedHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(explicitHeaders)) {
+      if (isForbiddenFetchHeader(k)) cdpForcedHeaders[k] = v;
+    }
+    const cdpForcedRemove: string[] = [];
+    for (const name of removeSet) {
+      if (isForbiddenFetchHeader(name)) cdpForcedRemove.push(name);
+    }
+
+    const reqBody = method !== "GET" && method !== "HEAD" ? body : undefined;
+    type RepeaterResp = {
+      status: number;
+      statusText: string;
+      url: string;
+      redirected: boolean;
+      headers: [string, string][];
+      body: string;
+      ms: number;
+      via: string;
+    };
+
+    const runInTab = async (): Promise<RepeaterResp> => {
+      const payload = JSON.stringify({
+        url: targetUrl,
+        method,
+        headers: jsHeaders,
+        body: reqBody ?? null,
+        redirect: followRedirects ? "follow" : "manual",
+      });
+      const expr = `(async () => {
+        const cfg = ${payload};
+        const t0 = performance.now();
+        try {
+          const init = {
+            method: cfg.method,
+            headers: cfg.headers,
+            credentials: "include",
+            redirect: cfg.redirect,
+          };
+          if (cfg.body !== null) init.body = cfg.body;
+          const resp = await fetch(cfg.url, init);
+          const text = await resp.text();
+          return {
+            ok: true,
+            status: resp.status,
+            statusText: resp.statusText,
+            url: resp.url,
+            redirected: resp.redirected,
+            type: resp.type,
+            headers: Array.from(resp.headers.entries()),
+            body: text,
+            ms: Math.round(performance.now() - t0),
+          };
+        } catch (e) {
+          return { __error: e && e.message ? e.message : String(e), __name: e && e.name ? e.name : "" };
+        }
+      })()`;
+      const r = await cdp.send<{
+        result?: { value?: Record<string, unknown> };
+        exceptionDetails?: { exception?: { description?: string }; text: string };
+      }>(tabId, "Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true, timeout: 30_000 });
+      if (r.exceptionDetails) {
+        throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
+      }
+      const val = r.result?.value;
+      if (!val || typeof val !== "object") throw new Error("resposta vazia do fetch na aba.");
+      if ("__error" in val) throw new Error(String(val.__error));
+      if (val.type === "opaqueredirect") {
+        return {
+          status: 302,
+          statusText: "(opaque redirect — navegador ocultou headers/location com follow_redirects=false)",
+          url: String(val.url || targetUrl),
+          redirected: true,
+          headers: [],
+          body: "",
+          ms: Number(val.ms ?? 0),
+          via: "aba",
+        };
+      }
+      return {
+        status: Number(val.status ?? 0),
+        statusText: String(val.statusText ?? ""),
+        url: String(val.url || targetUrl),
+        redirected: Boolean(val.redirected),
+        headers: Array.isArray(val.headers) ? (val.headers as [string, string][]) : [],
+        body: String(val.body ?? ""),
+        ms: Number(val.ms ?? 0),
+        via: "aba",
+      };
+    };
+
+    const runInExtension = async (): Promise<RepeaterResp> => {
+      const t0 = Date.now();
+      const init: RequestInit = {
+        method,
+        headers: jsHeaders,
+        credentials: "include",
+        redirect: followRedirects ? "follow" : "manual",
+      };
+      if (reqBody !== undefined) init.body = reqBody;
+      const resp = await fetch(targetUrl, init);
+      const respText = await resp.text();
+      return {
+        status: resp.status,
+        statusText: resp.statusText,
+        url: resp.url || targetUrl,
+        redirected: resp.redirected,
+        headers: Array.from(resp.headers.entries()),
+        body: respText,
+        ms: Date.now() - t0,
+        via: "extensão (cross-origin/CORS bypass)",
+      };
+    };
+
+    let result: RepeaterResp;
+    let cdpOverrideActive = Object.keys(cdpForcedHeaders).length > 0 || cdpForcedRemove.length > 0;
+    const canRunInTab = !cdp.isRestricted(tab.url) && Boolean(tab.url && /^https?:\/\//i.test(tab.url)) && !cdp.pendingDialog(tabId);
+    if (canRunInTab) {
+      try {
+        result = cdpOverrideActive
+          ? await cdp.withOneShotRequestHeaders(
+              tabId,
+              { url: targetUrl, method, setHeaders: cdpForcedHeaders, removeHeaders: cdpForcedRemove },
+              runInTab,
+            )
+          : await runInTab();
+      } catch (e) {
+        const msg = (e as Error)?.message ?? String(e);
+        if (/failed to fetch|cors|networkerror/i.test(msg)) {
+          result = await runInExtension();
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      result = await runInExtension();
+    }
+
+    const out: string[] = [];
+    out.push("=== REPEATED REQUEST ===");
+    out.push(`${method} ${targetUrl}`);
+    const displayReqHeaders = result.via === "aba" ? mergedHeaders : jsHeaders;
+    const reqHdrLines = formatHeaders(displayReqHeaders);
+    out.push(...(reqHdrLines.length ? reqHdrLines : ["(sem headers explícitos; cookies da sessão incluídos)"]));
+    if (result.via !== "aba" && cdpOverrideActive) {
+      out.push(
+        `(aviso: fallback cross-origin executado fora da aba; headers restritos [${Object.keys(cdpForcedHeaders).concat(cdpForcedRemove).join(", ")}] não foram sobrescritos via CDP)`,
+      );
+    }
+    if (reqBody !== undefined) {
+      out.push("");
+      out.push(reqBody.slice(0, maxBody));
+      if (reqBody.length > maxBody) {
+        out.push(`\n(request body truncado em ${maxBody} caracteres de ${reqBody.length})`);
+      }
+    }
+
+    out.push("");
+    out.push(`=== RESPONSE (${result.ms}ms, via ${result.via}) ===`);
+    out.push(`HTTP ${result.status}${result.statusText ? ` ${result.statusText}` : ""}`);
+    if (result.redirected && result.url && result.url !== targetUrl) {
+      out.push(`Final-URL: ${result.url}`);
+    }
+    if (result.headers.length) {
+      for (const [k, v] of result.headers) out.push(`${k}: ${v}`);
+    } else {
+      out.push("(nenhum header de resposta exposto)");
+    }
+    out.push("");
+    if (result.body.length === 0) {
+      out.push("(sem corpo)");
+    } else {
+      out.push(result.body.slice(0, maxBody));
+      if (result.body.length > maxBody) {
+        out.push(`\n(response body truncado em ${maxBody} caracteres de ${result.body.length})`);
+      }
+    }
+    return text(out.join("\n"));
+  },
 };
 
 const STOPPED =
@@ -707,6 +1441,7 @@ const errorResult = (e: unknown): ToolResult => ({
 const PAGE_TOOLS = new Set([
   "read_page", "find", "get_page_text", "computer", "screenshot", "form_input", "file_upload",
   "read_console", "read_network", "javascript", "handle_dialog", "gif_creator",
+  "cookies", "storage", "http_headers", "intercept_rules", "http_repeater",
 ]);
 
 // Ações que geram um quadro quando o GIF está gravando.
@@ -740,13 +1475,16 @@ async function authorize(name: string, ctx: Ctx, args: Args): Promise<void> {
     const tab = await chrome.tabs.get(args.tab_id).catch(() => undefined);
     await permissions.checkSite(ctx.session, ctx.client, tab?.url);
   }
+  if (name === "http_repeater" && typeof args.url === "string" && args.url.trim()) {
+    await permissions.checkSite(ctx.session, ctx.client, normalizeUrl(args.url));
+  }
 }
 
 /** Resumo curto dos argumentos para o log do side panel. */
 function summarize(name: string, args: Args): string {
   const parts: string[] = [];
   if (typeof args.action === "string") parts.push(args.action);
-  for (const k of ["url", "query", "ref", "text", "filter"] as const) {
+  for (const k of ["url", "url_pattern", "method", "request_id", "query", "ref", "text", "filter", "name", "key"] as const) {
     const v = args[k];
     if (typeof v === "string" && v) parts.push(k === "text" && args.action === "type" ? `"${v.length > 24 ? v.slice(0, 23) + "…" : v}"` : v);
   }
