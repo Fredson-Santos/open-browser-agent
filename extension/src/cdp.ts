@@ -114,9 +114,34 @@ const extraTabHeaders = new Map<number, HeaderState>();
 const interceptRules = new Map<number, InterceptRule[]>();
 const oneShotOverrides = new Map<number, OneShotOverride[]>();
 const fetchEnabledTabs = new Set<number>();
+const stealthTabs = new Set<number>();
+const stealthScriptRegistered = new Set<number>();
 const dialogs = new Map<number, Dialog>();
 const dialogWaiters = new Map<number, Set<(d: Dialog) => void>>();
 let ruleSeq = 0;
+
+const STEALTH_INIT_SCRIPT = `(() => {
+  try {
+    Object.defineProperty(Navigator.prototype, "webdriver", { get: () => undefined, configurable: true });
+  } catch {}
+  try {
+    if (!window.chrome) Object.defineProperty(window, "chrome", { value: { runtime: {} }, configurable: true });
+  } catch {}
+})();`;
+
+export function setStealthTab(tabId: number, enabled: boolean): void {
+  if (enabled) {
+    stealthTabs.add(tabId);
+    if (attached.has(tabId) && !stealthScriptRegistered.has(tabId)) {
+      stealthScriptRegistered.add(tabId);
+      void chrome.debugger
+        .sendCommand({ tabId }, "Page.addScriptToEvaluateOnNewDocument", { source: STEALTH_INIT_SCRIPT })
+        .catch(() => {});
+    }
+  } else {
+    stealthTabs.delete(tabId);
+  }
+}
 
 function push<T>(list: T[], item: T): void {
   list.push(item);
@@ -536,6 +561,7 @@ chrome.debugger.onDetach.addListener((src) => {
   if (src.tabId !== undefined) {
     attached.delete(src.tabId);
     fetchEnabledTabs.delete(src.tabId);
+    stealthScriptRegistered.delete(src.tabId);
     dialogs.delete(src.tabId);
   }
 });
@@ -549,6 +575,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   interceptRules.delete(tabId);
   oneShotOverrides.delete(tabId);
   fetchEnabledTabs.delete(tabId);
+  stealthTabs.delete(tabId);
+  stealthScriptRegistered.delete(tabId);
   dialogs.delete(tabId);
 });
 
@@ -627,10 +655,15 @@ async function attach(tabId: number): Promise<void> {
     await cmd("Fetch.enable", { patterns });
     fetchEnabledTabs.add(tabId);
   }
+  const isStealth = stealthTabs.has(tabId);
+  if (isStealth) {
+    stealthScriptRegistered.add(tabId);
+    await cmd("Page.addScriptToEvaluateOnNewDocument", { source: STEALTH_INIT_SCRIPT });
+  }
   // Faz a página se comportar como focada mesmo com o usuário em outra janela
   // (ex.: no terminal do agente); sem isso, foco e digitação podem falhar.
   await cmd("Emulation.setFocusEmulationEnabled", { enabled: true });
-  await waitViewportStable(tabId);
+  if (!isStealth) await waitViewportStable(tabId);
 }
 
 /** Anexa o depurador para começar a coletar console/rede desde já. */

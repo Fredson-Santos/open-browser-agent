@@ -27,6 +27,7 @@ import (
 type client struct {
 	session string
 	name    string
+	stealth bool
 	conn    net.Conn
 	mu      sync.Mutex
 }
@@ -71,7 +72,13 @@ func Run(origin string) error {
 	}
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
-	info := config.HostInfo{Port: port, PID: os.Getpid(), Ext: origin, Started: time.Now().UnixMilli()}
+	info := config.HostInfo{
+		Port:     port,
+		PID:      os.Getpid(),
+		Ext:      origin,
+		Headless: os.Getenv("OBA_LAUNCHED_HEADLESS") == "1",
+		Started:  time.Now().UnixMilli(),
+	}
 	if err := config.WriteHostInfo(info); err != nil {
 		return err
 	}
@@ -164,16 +171,25 @@ func (h *Hub) serve(conn net.Conn) {
 		log.Printf("conexão recusada de %s: token inválido", conn.RemoteAddr())
 		return
 	}
+	if hello.Stealth && !config.IsCybersecEnabled() {
+		b, _ := json.Marshal(wire.HostMsg{
+			Type:  "error",
+			Error: "modo cybersec/stealth bloqueado neste host: confirme primeiro com 'oba install --cybersec'",
+		})
+		conn.Write(append(b, '\n'))
+		log.Printf("conexão stealth recusada de %s: cybersec não habilitado", conn.RemoteAddr())
+		return
+	}
 	name := strings.TrimSpace(hello.Client)
 	if name == "" {
 		name = "agente"
 	}
-	c := &client{name: name, conn: conn}
+	c := &client{name: name, stealth: hello.Stealth, conn: conn}
 	h.mu.Lock()
 	c.session = h.sessionID(hello.Resume)
 	h.clients[c.session] = c
 	h.mu.Unlock()
-	log.Printf("cliente %q conectado (sessão %s)", name, c.session)
+	log.Printf("cliente %q conectado (sessão %s, stealth=%v)", name, c.session, c.stealth)
 	c.send(wire.HostMsg{Type: "welcome", Session: c.session})
 
 	defer func() {
@@ -207,12 +223,20 @@ func (h *Hub) serve(conn net.Conn) {
 		if m.Type != "call" {
 			continue
 		}
+		if h.info.Headless && !c.stealth {
+			c.send(wire.HostMsg{
+				Type:  "result",
+				ID:    m.ID,
+				Error: "este host está rodando em modo --headless (sem janela visível para aprovar popups de permissão). Reconecte com `oba mcp --headless --cybersec` + OBA_CYBERSEC=1 (após `oba install --cybersec`), ou abra um navegador visível com a extensão OBA.",
+			})
+			continue
+		}
 		h.mu.Lock()
 		h.pending[key] = pending{c: c, id: m.ID}
 		h.mu.Unlock()
 		err := h.ext.Send(wire.ExtMsg{
 			Type: "tool_request", ID: key, Session: c.session, Client: c.name,
-			Tool: m.Tool, Args: m.Args,
+			Stealth: c.stealth, Tool: m.Tool, Args: m.Args,
 		})
 		if err != nil {
 			h.mu.Lock()

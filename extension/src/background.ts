@@ -20,6 +20,7 @@ type HostMessage = {
   id?: string;
   session?: string;
   client?: string;
+  stealth?: boolean;
   tool?: string;
   args?: Record<string, unknown>;
   version?: string;
@@ -88,7 +89,7 @@ function connect(): void {
 async function handle(p: chrome.runtime.Port, msg: HostMessage): Promise<void> {
   switch (msg.type) {
     case "tool_request": {
-      const ctx = { session: msg.session ?? "?", client: msg.client ?? "agente", call: msg.id };
+      const ctx = { session: msg.session ?? "?", client: msg.client ?? "agente", stealth: msg.stealth === true, call: msg.id };
       const result = await tools.run(msg.tool ?? "", ctx, msg.args ?? {});
       try {
         p.postMessage({ type: "tool_response", id: msg.id, result });
@@ -186,7 +187,7 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== "complete") return;
   void (async () => {
     const found = await sessions.byGroup(tab.groupId);
-    if (found) await overlay.attach(tabId, found[1].client, { stopped: found[1].stopped });
+    if (found && !found[1].stealth) await overlay.attach(tabId, found[1].client, { stopped: found[1].stopped });
   })();
 });
 

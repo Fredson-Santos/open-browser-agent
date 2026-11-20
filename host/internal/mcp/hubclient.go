@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"oba/internal/config"
+	"oba/internal/headless"
 	"oba/internal/wire"
 )
 
@@ -44,6 +45,19 @@ var Browser = os.Getenv("OBA_BROWSER")
 // no mesmo projeto volta ao mesmo grupo de abas.
 var Session = os.Getenv("OBA_SESSION")
 
+// Headless inicia ou reutiliza um navegador --headless=new gerenciado pelo OBA.
+var Headless bool
+
+// Stealth ativa auto-aprovação, ausência de overlay e coleta irrestrita na extensão.
+// Exige gate explícito em main.go (--cybersec + OBA_CYBERSEC=1 + oba install --cybersec).
+var Stealth bool
+
+// ExtensionDir e Proxy configuram o launcher headless quando Headless == true.
+var (
+	ExtensionDir = os.Getenv("OBA_EXT_DIR")
+	Proxy        = os.Getenv("OBA_PROXY")
+)
+
 func (h *hubClient) resumeKey() string {
 	if Session != "" {
 		return Session
@@ -54,13 +68,41 @@ func (h *hubClient) resumeKey() string {
 
 // dialHost conecta ao native host preferido, descartando registros obsoletos.
 func dialHost() (net.Conn, config.HostInfo, error) {
+	if Headless {
+		h, err := headless.EnsureRunning(context.Background(), headless.Options{
+			Browser:          Browser,
+			ExtensionDir:     ExtensionDir,
+			Proxy:            Proxy,
+			IgnoreCertErrors: Stealth || Proxy != "",
+		})
+		if err != nil {
+			return nil, config.HostInfo{}, err
+		}
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", h.Port), 2*time.Second)
+		if err != nil {
+			return nil, config.HostInfo{}, fmt.Errorf("falha ao conectar no host headless (porta %d): %w", h.Port, err)
+		}
+		return conn, h, nil
+	}
+
 	hosts, err := config.ListHosts()
 	if err != nil {
 		return nil, config.HostInfo{}, err
 	}
 	want := strings.ToLower(strings.TrimSpace(Browser))
 	var others []string
+	var ordered []config.HostInfo
 	for _, h := range hosts {
+		if !h.Headless {
+			ordered = append(ordered, h)
+		}
+	}
+	for _, h := range hosts {
+		if h.Headless {
+			ordered = append(ordered, h)
+		}
+	}
+	for _, h := range ordered {
 		if want != "" && !strings.Contains(strings.ToLower(h.Browser), want) {
 			others = append(others, h.Browser)
 			continue
@@ -90,7 +132,7 @@ func (h *hubClient) connect() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	hello := wire.ClientMsg{Type: "hello", Token: token, Client: h.name}
+	hello := wire.ClientMsg{Type: "hello", Token: token, Client: h.name, Stealth: Stealth}
 	if h.resume {
 		hello.Resume = h.resumeKey()
 	}
@@ -140,6 +182,14 @@ func (h *hubClient) readLoop(conn net.Conn, sc *bufio.Scanner) {
 	}
 	h.mu.Unlock()
 	conn.Close()
+}
+
+// EnsureReady garante que o navegador (inclusive headless) esteja iniciado e conectado.
+func (h *hubClient) EnsureReady() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, err := h.connect()
+	return err
 }
 
 // Probe verifica se o native host aceita uma conexão autenticada.

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>OBA Stealth Lab</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem; background: #0f1115; color: #e4e6eb; }
+  h1 { font-size: 1.4rem; }
+  section { border: 1px solid #2a2d35; border-radius: 8px; padding: 1rem; margin-bottom: 1.2rem; background: #161820; }
+  h2 { margin-top: 0; font-size: 1.05rem; }
+  p.goal { color: #9aa0ab; font-size: 0.9rem; }
+  button { background: #2563eb; color: white; border: none; padding: 0.5rem 0.9rem; border-radius: 6px; cursor: pointer; margin-right: 0.4rem; }
+  button:hover { background: #1d4ed8; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.6rem; }
+  th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #2a2d35; }
+  .ok { color: #22c55e; }
+  .bad { color: #ef4444; font-weight: bold; }
+  pre { background: #0b0c10; border: 1px solid #2a2d35; border-radius: 6px; padding: 0.7rem; overflow-x: auto; font-size: 0.82rem; white-space: pre-wrap; }
+  .verdict { font-size: 1.1rem; font-weight: bold; margin-top: 0.6rem; }
+  .flag { color: #22c55e; }
+</style>
+</head>
+<body>
+  <h1>🕵️ OBA Stealth Lab</h1>
+  <p class="goal">
+    Site local para comparar o fingerprint de automação da aba <strong>com</strong> e <strong>sem</strong>
+    <code>--cybersec</code>/<code>OBA_CYBERSEC=1</code>. Nenhum dado real, nenhuma rede externa.
+    Não é um detector de bot sério — é só um conjunto de sinais clássicos pra validar o
+    <code>STEALTH_INIT_SCRIPT</code> do OBA (<code>cdp.ts</code>).
+  </p>
+
+  <section>
+    <h2>Fluxo sugerido</h2>
+    <p class="goal">
+      1. Abra esta página numa aba do OBA <strong>sem</strong> stealth e rode o scan — anote o resultado.<br/>
+      2. Repita com uma aba criada em modo <code>--cybersec</code> (ou em <code>--headless --cybersec</code>) — compare.<br/>
+      3. Só <code>navigator.webdriver</code> tem peso garantido: é o único sinal que o OBA promete mascarar. Os demais são
+      informativos (o Chrome <code>--headless=new</code> moderno já não falha a maioria por padrão).
+    </p>
+  </section>
+
+  <section>
+    <h2>Scan de fingerprint</h2>
+    <button onclick="runScan()">Rodar scan</button>
+    <table id="table"><tbody></tbody></table>
+    <div id="verdict" class="verdict"></div>
+    <pre id="raw" style="display:none"></pre>
+  </section>
+
+  <section>
+    <h2>Utilitário</h2>
+    <button onclick="whoami()">Ver headers reais (/api/whoami)</button>
+    <pre id="whoamiOut">(aguardando)</pre>
+  </section>
+
+<script>
+function collect() {
+  let webglRenderer = "";
+  try {
+    const gl = document.createElement("canvas").getContext("webgl");
+    const ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
+    webglRenderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "";
+  } catch {}
+  return {
+    webdriver: navigator.webdriver === true,
+    userAgent: navigator.userAgent,
+    hasChrome: typeof window.chrome === "object" && window.chrome !== null,
+    pluginsLength: navigator.plugins ? navigator.plugins.length : 0,
+    languagesLength: navigator.languages ? navigator.languages.length : 0,
+    outerWidth: window.outerWidth,
+    outerHeight: window.outerHeight,
+    webglRenderer,
+  };
+}
+
+async function runScan() {
+  const fp = collect();
+  const r = await fetch('/api/fingerprint', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fp),
+  });
+  const result = await r.json();
+  const tbody = document.querySelector('#table tbody');
+  tbody.innerHTML = '<tr><th>Sinal</th><th>Peso</th><th>Status</th><th>Nota</th></tr>' +
+    result.signals.map(s =>
+      `<tr><td>${s.name}</td><td>${s.weight}</td><td class="${s.bad ? 'bad' : 'ok'}">${s.bad ? '⚠ suspeito' : '✓ ok'}</td><td>${s.note}</td></tr>`
+    ).join('');
+  const v = document.getElementById('verdict');
+  v.innerHTML = `Score: ${result.score}/${result.maxScore} — ` +
+    (result.automationLikely
+      ? '<span class="bad">⚠ automação provável</span>'
+      : '<span class="ok">✓ sem sinal forte de automação</span>') +
+    (result.flag ? ` — <span class="flag">${result.flag}</span>` : '');
+  document.getElementById('raw').style.display = 'block';
+  document.getElementById('raw').textContent = JSON.stringify({ fp, result }, null, 2);
+}
+
+async function whoami() {
+  const r = await fetch('/api/whoami');
+  document.getElementById('whoamiOut').textContent = await r.text();
+}
+</script>
+</body>
+</html>

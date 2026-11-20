@@ -59,6 +59,7 @@ export type SessionView = {
   stopped?: boolean;
   approved?: boolean;
   denied?: boolean;
+  stealth?: boolean;
   sites?: string[];
   /** o processo do agente saiu; o grupo espera um novo processo com a mesma chave */
   disconnected?: boolean;

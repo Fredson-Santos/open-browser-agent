@@ -59,12 +59,32 @@ func Token() (string, error) {
 // HostInfo descreve um native host em execução. Cada navegador (ou perfil)
 // com a extensão ativa inicia o seu, e cada um grava hosts/<pid>.json.
 type HostInfo struct {
-	Port    int    `json:"port"`
-	PID     int    `json:"pid"`
-	Ext     string `json:"extension_origin"`
-	Browser string `json:"browser,omitempty"`
-	Started int64  `json:"started"` // unix ms
-	Path    string `json:"-"`
+	Port     int    `json:"port"`
+	PID      int    `json:"pid"`
+	Ext      string `json:"extension_origin"`
+	Browser  string `json:"browser,omitempty"`
+	Headless bool   `json:"headless,omitempty"`
+	Started  int64  `json:"started"` // unix ms
+	Path     string `json:"-"`
+}
+
+// CybersecConfig guarda a confirmação explícita do usuário (`oba install --cybersec`)
+// para permitir o modo stealth/autônomo sem popups.
+type CybersecConfig struct {
+	Enabled      bool   `json:"enabled"`
+	ExtensionDir string `json:"extension_dir,omitempty"`
+	BrowserBin   string `json:"browser_bin,omitempty"`
+	EnabledAt    string `json:"enabled_at,omitempty"`
+}
+
+// HeadlessState registra a instância headless iniciada pelo `oba mcp --headless`.
+type HeadlessState struct {
+	Browser    string `json:"browser"`
+	BrowserPID int    `json:"browser_pid"`
+	HostPID    int    `json:"host_pid"`
+	HostPort   int    `json:"host_port"`
+	ProfileDir string `json:"profile_dir"`
+	Started    int64  `json:"started"`
 }
 
 func hostsDir() (string, error) {
@@ -130,3 +150,97 @@ func RemoveHostInfo() {
 func LogPath() (string, error) { return path("host.log") }
 
 func ManifestPath() (string, error) { return path(HostName + ".json") }
+
+func CybersecConfigPath() (string, error) { return path("cybersec.json") }
+
+func HeadlessStatePath() (string, error) { return path("headless.json") }
+
+func HeadlessProfileDir() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "cybersec-profile")
+	return p, os.MkdirAll(p, 0o700)
+}
+
+func LoadCybersecConfig() (CybersecConfig, error) {
+	p, err := CybersecConfigPath()
+	if err != nil {
+		return CybersecConfig{}, err
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return CybersecConfig{}, nil
+		}
+		return CybersecConfig{}, err
+	}
+	var c CybersecConfig
+	if err := json.Unmarshal(b, &c); err != nil {
+		return CybersecConfig{}, err
+	}
+	return c, nil
+}
+
+func SaveCybersecConfig(c CybersecConfig) error {
+	p, err := CybersecConfigPath()
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+func IsCybersecEnabled() bool {
+	c, err := LoadCybersecConfig()
+	return err == nil && c.Enabled
+}
+
+func LoadHeadlessState() (HeadlessState, error) {
+	p, err := HeadlessStatePath()
+	if err != nil {
+		return HeadlessState{}, err
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return HeadlessState{}, nil
+		}
+		return HeadlessState{}, err
+	}
+	var st HeadlessState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return HeadlessState{}, err
+	}
+	return st, nil
+}
+
+func SaveHeadlessState(st HeadlessState) error {
+	p, err := HeadlessStatePath()
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+func RemoveHeadlessState() {
+	if p, err := HeadlessStatePath(); err == nil {
+		os.Remove(p)
+	}
+}

@@ -62,6 +62,11 @@ func (s *server) write(r response) {
 func Run() error {
 	hub := newHubClient("agente")
 	hub.resume = true
+	if Headless {
+		if err := hub.EnsureReady(); err != nil {
+			return err
+		}
+	}
 	s := &server{out: os.Stdout, hub: hub, calls: map[string]context.CancelFunc{}}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
@@ -100,12 +105,16 @@ func (s *server) handle(req request) {
 		if version == "" {
 			version = defaultProtocol
 		}
+		instructions := "Controla o navegador do usuário através da extensão OBA. " +
+			"Comece com tabs_context (create_if_empty=true) para obter uma aba do seu grupo."
+		if Stealth {
+			instructions += " Modo CyberSec/stealth ativo: use read_network, cookies, storage, http_headers, intercept_rules e http_repeater para análise e testes ofensivos."
+		}
 		s.write(response{ID: req.ID, Result: map[string]any{
 			"protocolVersion": version,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "oba", "version": config.Version},
-			"instructions": "Controla o navegador do usuário através da extensão OBA. " +
-				"Comece com tabs_context (create_if_empty=true) para obter uma aba do seu grupo.",
+			"instructions":    instructions,
 		}})
 	case "notifications/cancelled":
 		var p struct {

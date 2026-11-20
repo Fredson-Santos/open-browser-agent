@@ -15,6 +15,8 @@ interface ReadOptions {
   max_depth?: number;
   ref_id?: string;
   max_chars?: number;
+  include_secrets?: boolean;
+  include_hidden?: boolean;
 }
 
 // ---------------------------------------------------------------- refs
@@ -65,7 +67,7 @@ const NAME_FROM_CONTENT = new Set([
 
 const SKIP_TAGS = new Set(["script", "style", "noscript", "template", "head", "meta", "link", "svg"]);
 
-function implicitRole(el: Element): string | null {
+function implicitRole(el: Element, includeHidden = false): string | null {
   const tag = el.tagName.toLowerCase();
   switch (tag) {
     case "a":
@@ -76,7 +78,7 @@ function implicitRole(el: Element): string | null {
       return "button";
     case "input": {
       const t = ((el as HTMLInputElement).type || "text").toLowerCase();
-      if (t === "hidden") return null;
+      if (t === "hidden") return includeHidden ? "hidden_input" : null;
       if (["button", "submit", "reset", "image"].includes(t)) return "button";
       if (t === "checkbox") return "checkbox";
       if (t === "radio") return "radio";
@@ -119,10 +121,10 @@ function implicitRole(el: Element): string | null {
   return null;
 }
 
-function roleOf(el: Element): string | null {
+function roleOf(el: Element, includeHidden = false): string | null {
   const explicit = el.getAttribute("role")?.trim().split(/\s+/)[0];
   if (explicit && explicit !== "presentation" && explicit !== "none") return explicit;
-  return implicitRole(el);
+  return implicitRole(el, includeHidden);
 }
 
 function style(el: Element): CSSStyleDeclaration {
@@ -141,7 +143,10 @@ function isClickableGeneric(el: Element): boolean {
 
 const FORM_CONTROLS = new Set(["input", "select", "textarea"]);
 
-function isHidden(el: Element): boolean {
+function isHidden(el: Element, includeHidden = false): boolean {
+  if (includeHidden && el.tagName.toLowerCase() === "input" && ((el as HTMLInputElement).type || "").toLowerCase() === "hidden") {
+    return false;
+  }
   if (el.getAttribute("aria-hidden") === "true") return true;
   // Checkboxes/radios estilizados costumam esconder o <input> real com
   // opacity: 0 e desenhar outro elemento por cima; o controle continua usável.
@@ -249,7 +254,7 @@ function nameOf(el: Element, role: string | null): string {
   return clean(el.getAttribute("title"));
 }
 
-function extrasOf(el: Element, role: string | null): string {
+function extrasOf(el: Element, role: string | null, includeSecrets = false): string {
   const parts: string[] = [];
   const tag = el.tagName.toLowerCase();
   if (role === "link") {
@@ -258,12 +263,19 @@ function extrasOf(el: Element, role: string | null): string {
   }
   if (tag === "input" || tag === "textarea") {
     const input = el as HTMLInputElement;
-    if (input.type === "checkbox" || input.type === "radio") {
+    if (role === "hidden_input") {
+      if (input.name || input.id) parts.push(`name="${clean(input.name || input.id, 60)}"`);
+      if (includeSecrets) parts.push(`value="${clean(input.value, 200)}"`);
+    } else if (input.type === "checkbox" || input.type === "radio") {
       parts.push(input.checked ? "(marcado)" : "(desmarcado)");
     } else if (input.value && !["button", "submit", "reset"].includes(input.type)) {
-      parts.push(isSensitive(el) ? `value="[value redacted]"` : `value="${clean(input.value, 80)}"`);
+      parts.push(
+        isSensitive(el) && !includeSecrets
+          ? `value="[value redacted]"`
+          : `value="${clean(input.value, includeSecrets ? 200 : 80)}"`,
+      );
     }
-    if (input.type && !["text", "textarea", "checkbox", "radio", "submit", "button"].includes(input.type)) {
+    if (input.type && !["text", "textarea", "checkbox", "radio", "submit", "button", "hidden"].includes(input.type)) {
       parts.push(`type=${input.type}`);
     }
   } else if (tag === "select") {
@@ -304,6 +316,7 @@ interface WalkState {
   visit: (n: TreeNode) => boolean; // false = parar
   stopped: boolean;
   text: boolean; // emitir nós de texto (filtro "all")
+  includeHidden?: boolean;
 }
 
 /** Filhos na ordem do composed tree (shadow DOM aberto + slots + iframes). */
@@ -332,14 +345,15 @@ function walk(el: Element, depth: number, inNamed: boolean, st: WalkState): void
     return;
   }
   const tag = el.tagName.toLowerCase();
-  if (SKIP_TAGS.has(tag) || isHidden(el)) return;
+  if (SKIP_TAGS.has(tag) || isHidden(el, !!st.includeHidden)) return;
 
-  let role = roleOf(el);
+  let role = roleOf(el, !!st.includeHidden);
   if (!role && !inNamed && isClickableGeneric(el)) role = "clickable";
   const interactive = !!role && (INTERACTIVE.has(role) || role === "file");
 
   let printed = false;
-  if (role && (st.filter === "all" ? role !== "label" : interactive)) {
+  const printable = st.filter === "all" ? role !== "label" : interactive || (!!st.includeHidden && role === "hidden_input");
+  if (role && printable) {
     const name = nameOf(el, role);
     const isGenericLandmark = !name && !interactive && ["list", "listitem", "row", "cell", "form", "table"].includes(role);
     if (!isGenericLandmark) {
@@ -390,6 +404,8 @@ function readPage(opts: ReadOptions = {}): string {
   pruneRefs();
   const filter: Filter = opts.filter === "interactive" ? "interactive" : "all";
   const maxChars = opts.max_chars ?? 50_000;
+  const includeSecrets = opts.include_secrets === true;
+  const includeHidden = opts.include_hidden === true;
   const lines: string[] = [];
   let size = 0;
   let truncated = false;
@@ -401,11 +417,12 @@ function readPage(opts: ReadOptions = {}): string {
     timedOut: false,
     stopped: false,
     text: filter === "all",
+    includeHidden,
     visit(n) {
       const indent = filter === "interactive" ? "" : "  ".repeat(n.depth);
       const line = n.role === "text"
         ? `${indent}- text "${n.name}"`
-        : `${indent}- ${n.role}${n.name ? ` "${n.name}"` : ""} [${refFor(n.el)}]${extrasOf(n.el, n.role)}`;
+        : `${indent}- ${n.role}${n.name ? ` "${n.name}"` : ""} [${refFor(n.el)}]${extrasOf(n.el, n.role, includeSecrets)}`;
       if (size + line.length + 1 > maxChars) {
         truncated = true;
         return false;
@@ -453,7 +470,7 @@ const ALL_ROLE_WORDS = new Set(Object.values(ROLE_WORDS).flat().filter((w) => !w
  * só desempatam: "botão mais resultados" acha o elemento "Mais resultados"
  * mesmo que ele seja uma div clicável e haja vários botões "Mais informações".
  */
-function find(query: string, limit = 20): string {
+function find(query: string, limit = 20, includeSecrets = false): string {
   pruneRefs();
   const q = norm(query.trim());
   if (!q) throw new Error("query vazia.");
@@ -506,7 +523,7 @@ function find(query: string, limit = 20): string {
   hits.sort((a, b) => b.score - a.score);
   const top = hits.slice(0, limit);
   if (top.length === 0) return `Nenhum elemento corresponde a "${query}". Tente read_page.`;
-  const lines = top.map(({ n }) => `- ${n.role}${n.name ? ` "${n.name}"` : ""} [${refFor(n.el)}]${extrasOf(n.el, n.role)}`);
+  const lines = top.map(({ n }) => `- ${n.role}${n.name ? ` "${n.name}"` : ""} [${refFor(n.el)}]${extrasOf(n.el, n.role, includeSecrets)}`);
   return `${top.length} de ${hits.length} resultado(s) para "${query}":\n` + lines.join("\n") +
     (st.timedOut ? "\n(busca parcial: tempo limite atingido)" : "");
 }
@@ -712,7 +729,7 @@ function setNativeValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectE
 
 const truthy = (v: unknown) => v === true || /^(true|1|sim|yes|on|marcado|checked)$/i.test(String(v).trim());
 
-function formInput(refId: string, value: unknown): string {
+function formInput(refId: string, value: unknown, includeSecrets = false): string {
   const el = getRef(refId);
   const tag = el.tagName.toLowerCase();
   (el as HTMLElement).focus?.();
@@ -751,7 +768,7 @@ function formInput(refId: string, value: unknown): string {
     }
     if (input.type === "file") throw new Error("para campos de arquivo use file_upload.");
     setNativeValue(input, String(value ?? ""));
-    return `${refId} agora: ${isSensitive(input) ? "[value redacted]" : `"${clean(input.value, 80)}"`}`;
+    return `${refId} agora: ${isSensitive(input) && !includeSecrets ? "[value redacted]" : `"${clean(input.value, 80)}"`}`;
   }
 
   if (tag === "textarea") {

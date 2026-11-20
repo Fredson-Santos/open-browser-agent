@@ -18,10 +18,19 @@ import (
 	"time"
 
 	"oba/internal/config"
+	"oba/internal/headless"
 	"oba/internal/hub"
 	"oba/internal/install"
 	"oba/internal/mcp"
 )
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
 
 func main() {
 	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "chrome-extension://") {
@@ -41,7 +50,33 @@ func main() {
 		fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 		browser := fs.String("browser", "", "navegador a controlar (brave, chrome, edge…); padrão: o mais recente")
 		session := fs.String("session", "", "chave da sessão: processos com a mesma chave reusam o mesmo grupo de abas; padrão: cliente + diretório atual (ou OBA_SESSION)")
+		useHeadless := fs.Bool("headless", envBool("OBA_HEADLESS"), "inicia ou reutiliza um navegador --headless=new invisível com a extensão OBA carregada (exige --cybersec)")
+		cybersec := fs.Bool("cybersec", false, "ativa modo CyberSec/stealth (zero popups, sem overlay, leitura irrestrita); exige também OBA_CYBERSEC=1 e `oba install --cybersec`")
+		extDir := fs.String("extension-dir", "", "caminho para extension/dist (ou OBA_EXT_DIR)")
+		proxy := fs.String("proxy", "", "proxy HTTP para o navegador headless (ou OBA_PROXY, ex.: http://127.0.0.1:8788)")
 		fs.Parse(os.Args[2:])
+		if *useHeadless && !*cybersec {
+			fmt.Fprintln(os.Stderr, "erro: --headless exige --cybersec (com OBA_CYBERSEC=1 e `oba install --cybersec`): no modo headless não há janela visível para aprovar popups de permissão.")
+			os.Exit(1)
+		}
+		if *cybersec {
+			if !envBool("OBA_CYBERSEC") {
+				fmt.Fprintln(os.Stderr, "erro: --cybersec exige também a variável de ambiente OBA_CYBERSEC=1 (gate de segurança explícito).")
+				os.Exit(1)
+			}
+			if !config.IsCybersecEnabled() {
+				fmt.Fprintln(os.Stderr, "erro: --cybersec não está habilitado neste host: confirme primeiro com `oba install --cybersec`.")
+				os.Exit(1)
+			}
+			mcp.Stealth = true
+		}
+		mcp.Headless = *useHeadless
+		if *extDir != "" {
+			mcp.ExtensionDir = *extDir
+		}
+		if *proxy != "" {
+			mcp.Proxy = *proxy
+		}
 		if *browser != "" {
 			mcp.Browser = *browser
 		}
@@ -52,12 +87,41 @@ func main() {
 	case "install":
 		fs := flag.NewFlagSet("install", flag.ExitOnError)
 		ids := fs.String("extension-id", "", "IDs extras de extensão autorizados, separados por vírgula")
+		cybersec := fs.Bool("cybersec", false, "habilita o gate de host para o modo CyberSec/stealth (auto-aprovação, sem overlay, leitura irrestrita)")
+		disableCybersec := fs.Bool("disable-cybersec", false, "desabilita o modo CyberSec/stealth neste host")
+		extDir := fs.String("extension-dir", "", "caminho de extension/dist para salvar no perfil CyberSec (auto-detectado se omitido)")
+		browserBin := fs.String("browser-bin", "", "caminho opcional do executável do navegador headless para salvar no perfil CyberSec")
 		fs.Parse(os.Args[2:])
 		var extra []string
 		if *ids != "" {
 			extra = strings.Split(*ids, ",")
 		}
 		if err = install.Install(extra); err == nil {
+			if *disableCybersec {
+				if err = config.SaveCybersecConfig(config.CybersecConfig{Enabled: false}); err != nil {
+					break
+				}
+				fmt.Println("\n✓ Modo CyberSec/stealth DESABILITADO neste host.")
+			} else if *cybersec {
+				resolvedExt, _ := headless.ResolveExtensionDir(*extDir)
+				c := config.CybersecConfig{
+					Enabled:      true,
+					ExtensionDir: resolvedExt,
+					BrowserBin:   strings.TrimSpace(*browserBin),
+					EnabledAt:    time.Now().UTC().Format(time.RFC3339),
+				}
+				if err = config.SaveCybersecConfig(c); err != nil {
+					break
+				}
+				fmt.Println("\n⚠ MODO CYBERSEC/STEALTH HABILITADO NESTE HOST:")
+				fmt.Println("  Quando invocado com `--cybersec` + `OBA_CYBERSEC=1`, o OBA aprovará conexões, sites,")
+				fmt.Println("  uploads e execução de JavaScript sem popups, sem overlay e sem redação de senhas.")
+				if resolvedExt != "" {
+					fmt.Printf("  extension/dist salvo: %s\n", resolvedExt)
+				} else {
+					fmt.Println("  aviso: extension/dist não localizado automaticamente; informe --extension-dir ou OBA_EXT_DIR ao usar --headless.")
+				}
+			}
 			exe, _ := os.Executable()
 			fmt.Printf("\nPronto. Configure o agente com:\n  claude mcp add oba -- \"%s\" mcp\n", exe)
 			cfg, _ := json.MarshalIndent(map[string]any{"mcpServers": map[string]any{
@@ -67,12 +131,22 @@ func main() {
 		}
 	case "uninstall":
 		err = install.Uninstall()
+	case "stop-headless":
+		var stopped bool
+		stopped, err = headless.Stop()
+		if err == nil {
+			if stopped {
+				fmt.Println("✓ instância headless encerrada")
+			} else {
+				fmt.Println("nenhuma instância headless registrada")
+			}
+		}
 	case "status":
 		err = status()
 	case "version", "-v", "--version":
 		fmt.Println("oba", config.Version)
 	default:
-		fmt.Fprintln(os.Stderr, "uso: oba <install|uninstall|mcp|status|version>")
+		fmt.Fprintln(os.Stderr, "uso: oba <install|uninstall|mcp|status|stop-headless|version>")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -82,12 +156,16 @@ func main() {
 }
 
 func status() error {
+	cyber := "desabilitado"
+	if config.IsCybersecEnabled() {
+		cyber = "habilitado"
+	}
 	hosts, err := config.ListHosts()
 	if err != nil {
 		return err
 	}
 	if len(hosts) == 0 {
-		fmt.Println("✗ nenhum navegador conectado (abra o navegador com a extensão OBA ativa)")
+		fmt.Printf("✗ nenhum navegador conectado (cybersec: %s)\n", cyber)
 		return nil
 	}
 	for i, h := range hosts {
@@ -99,13 +177,17 @@ func status() error {
 		if i == 0 {
 			mark = "*"
 		}
+		tag := ""
+		if h.Headless {
+			tag = " [headless]"
+		}
 		since := time.UnixMilli(h.Started).Format("15:04:05")
-		fmt.Printf("%s %-8s pid %-6d porta %-5d desde %s\n", mark, name, h.PID, h.Port, since)
+		fmt.Printf("%s %-8s pid %-6d porta %-5d desde %s%s\n", mark, name, h.PID, h.Port, since, tag)
 	}
 	if err := mcp.Probe(); err != nil {
 		fmt.Println("✗ handshake falhou:", err)
 		return nil
 	}
-	fmt.Println("✓ conexão ok (* = usado por padrão; escolha outro com `oba mcp --browser <nome>` ou OBA_BROWSER)")
+	fmt.Printf("✓ conexão ok (cybersec: %s; * = usado por padrão; escolha outro com `oba mcp --browser <nome>` ou OBA_BROWSER)\n", cyber)
 	return nil
 }

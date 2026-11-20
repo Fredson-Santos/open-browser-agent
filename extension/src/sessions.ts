@@ -93,12 +93,13 @@ export async function listTabs(id: string, client: string): Promise<chrome.tabs.
 }
 
 /** Cria uma aba dentro do grupo da sessão (criando o grupo se preciso). */
-export function createTab(id: string, client: string, url?: string): Promise<chrome.tabs.Tab> {
-  return locked(() => createTabUnlocked(id, client, url));
+export function createTab(id: string, client: string, url?: string, stealth = false): Promise<chrome.tabs.Tab> {
+  return locked(() => createTabUnlocked(id, client, url, stealth));
 }
 
-async function createTabUnlocked(id: string, client: string, url?: string): Promise<chrome.tabs.Tab> {
+async function createTabUnlocked(id: string, client: string, url?: string, stealth = false): Promise<chrome.tabs.Tab> {
   const s = await get(id, client);
+  if (stealth) s.stealth = true;
   const g = await liveGroup(s);
 
   let windowId = g?.windowId;
@@ -110,16 +111,19 @@ async function createTabUnlocked(id: string, client: string, url?: string): Prom
     }
   }
   if (windowId === undefined) {
-    windowId = (await chrome.windows.create({ focused: true }))?.id;
+    windowId = (await chrome.windows.create({ focused: !stealth }))?.id;
   }
 
-  const tab = await chrome.tabs.create({ windowId, url: url ?? "about:blank", active: true });
+  const tab = await chrome.tabs.create({ windowId, url: url ?? "about:blank", active: !stealth });
   const tabId = tab.id!;
   if (g) {
     await chrome.tabs.group({ groupId: g.id, tabIds: [tabId] });
   } else {
     const groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId } });
-    await chrome.tabGroups.update(groupId, { title: `OBA · ${client}`, color: "cyan" });
+    await chrome.tabGroups.update(groupId, {
+      title: s.stealth ? `OBA · ${client} [stealth]` : `OBA · ${client}`,
+      color: s.stealth ? "purple" : "cyan",
+    });
     s.groupId = groupId;
   }
   await put(id, s);
@@ -185,7 +189,7 @@ export async function setStopped(id: string, stopped: boolean): Promise<void> {
     });
   }
   for (const tab of await groupTabs(s)) {
-    await overlay.setStopped(tab.id!, stopped);
+    if (!s.stealth) await overlay.setStopped(tab.id!, stopped);
     if (stopped) await cdp.detach(tab.id!);
   }
 }
@@ -202,14 +206,14 @@ export async function close(id: string): Promise<void> {
     const s = store[id];
     if (!s) return undefined;
     const g = await liveGroup(s);
-    if (g) store[id] = { client: s.client, groupId: g.id, disconnected: true };
+    if (g) store[id] = { client: s.client, groupId: g.id, disconnected: true, ...(s.stealth ? { stealth: true } : {}) };
     else delete store[id];
     await save(store);
     return g ? s : undefined;
   });
   if (!s) return;
   for (const tab of await groupTabs(s)) {
-    await overlay.remove(tab.id!);
+    if (!s.stealth) await overlay.remove(tab.id!);
     await cdp.detach(tab.id!);
   }
   const g = await liveGroup(s);
@@ -239,7 +243,12 @@ export async function revive(id: string): Promise<boolean> {
   });
   if (!s) return false;
   const g = await liveGroup(s);
-  if (g) await chrome.tabGroups.update(g.id, { title: `OBA · ${s.client}`, color: "cyan" });
+  if (g) {
+    await chrome.tabGroups.update(g.id, {
+      title: s.stealth ? `OBA · ${s.client} [stealth]` : `OBA · ${s.client}`,
+      color: s.stealth ? "purple" : "cyan",
+    });
+  }
   return !!g;
 }
 
@@ -261,8 +270,9 @@ function forget(id: string): Promise<Session | undefined> {
  * para a conversa continuar usando os mesmos tab_id.
  */
 export async function idle(id: string): Promise<void> {
-  for (const tab of await groupTabs(await info(id))) {
-    await overlay.remove(tab.id!);
+  const s = await info(id);
+  for (const tab of await groupTabs(s)) {
+    if (!s?.stealth) await overlay.remove(tab.id!);
     await cdp.detach(tab.id!);
   }
 }
@@ -272,7 +282,7 @@ export async function release(id: string): Promise<void> {
   const s = await forget(id);
   const tabs = await groupTabs(s);
   for (const tab of tabs) {
-    await overlay.remove(tab.id!);
+    if (!s?.stealth) await overlay.remove(tab.id!);
     await cdp.detach(tab.id!);
   }
   const ids = tabs.map((t) => t.id!);
