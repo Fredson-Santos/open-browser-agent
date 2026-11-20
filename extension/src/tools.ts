@@ -14,7 +14,57 @@ export type Content =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
 
-export type ToolResult = { content: Content[]; isError?: boolean };
+export type ArtexExchange = {
+  method: string;
+  url: string;
+  status: number;
+  requestHeaders: Record<string, string>;
+  requestBody: string;
+  responseHeaders: Record<string, string>;
+  responseBody: string;
+};
+
+export type ToolResult = { content: Content[]; isError?: boolean; _artex_exchanges?: ArtexExchange[] };
+
+const ARTEX_MAX_BODY = 256 * 1024;
+const ARTEX_HEADER_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function sanitizeArtexHeaders(headers?: Record<string, string> | [string, string][]): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers) return out;
+  const pairs: [string, string][] = Array.isArray(headers) ? headers : Object.entries(headers);
+  for (const [rawKey, rawVal] of pairs) {
+    const key = String(rawKey).trim().toLowerCase();
+    if (!key || key.startsWith(":") || !ARTEX_HEADER_RE.test(key)) continue;
+    const sep = key === "cookie" || key === "set-cookie" ? "; " : ", ";
+    const val = String(rawVal ?? "")
+      .replace(/\x00/g, "")
+      .replace(/\r?\n|\r/g, sep);
+    out[key] = val;
+  }
+  return out;
+}
+
+function entryToArtexExchange(entry: cdp.NetworkEntry, bodyOverride?: string): ArtexExchange | null {
+  if (!/^https?:\/\//i.test(entry.url) || typeof entry.status !== "number" || entry.status <= 0) {
+    return null;
+  }
+  const respBody =
+    bodyOverride !== undefined
+      ? bodyOverride
+      : entry.bodyBase64
+        ? ""
+        : (entry.body ?? "");
+  return {
+    method: entry.method.toUpperCase(),
+    url: entry.url,
+    status: entry.status,
+    requestHeaders: sanitizeArtexHeaders(entry.requestHeaders),
+    requestBody: (entry.postData ?? "").slice(0, ARTEX_MAX_BODY),
+    responseHeaders: sanitizeArtexHeaders(entry.responseHeaders),
+    responseBody: respBody.slice(0, ARTEX_MAX_BODY),
+  };
+}
 
 /** `call` identifica a chamada para o host poder cancelá-la (ver abortCall). */
 export type Ctx = { session: string; client: string; stealth?: boolean; call?: string; signal?: AbortSignal };
@@ -512,6 +562,7 @@ const handlers: Record<string, Handler> = {
     if (steps.length > 30) throw new Error("no máximo 30 ações por batch.");
     const stopOnError = args.stop_on_error !== false;
     const content: Content[] = [];
+    const collectedExchanges: ArtexExchange[] = [];
     let failed = 0;
     // Etapas rodam sem o id da chamada externa (cancelá-la cancela o batch inteiro pelo sinal).
     const inner: Ctx = { session: ctx.session, client: ctx.client, stealth: ctx.stealth, signal: ctx.signal };
@@ -526,6 +577,9 @@ const handlers: Record<string, Handler> = {
       if (name === "batch") r = errorResult("batch não pode conter outro batch.");
       else if (!handlers[name]) r = errorResult(`ferramenta desconhecida: ${name}`);
       else r = await execute(handlers[name], name, inner, stepArgs);
+      if (r._artex_exchanges?.length) {
+        collectedExchanges.push(...r._artex_exchanges);
+      }
       const err = r.isError ? r.content.find((c) => c.type === "text")?.text : undefined;
       await log({ t: Date.now(), client: ctx.client, tool: `batch › ${name}`, detail: summarize(name, stepArgs), ok: !r.isError, error: err?.slice(0, 200) });
       content.push({ type: "text", text: `── ${i + 1}. ${name} ${summarize(name, stepArgs)}${r.isError ? " ✗" : ""}` });
@@ -538,7 +592,11 @@ const handlers: Record<string, Handler> = {
         }
       }
     }
-    return { content, ...(failed && stopOnError ? { isError: true } : {}) };
+    return {
+      content,
+      ...(failed && stopOnError ? { isError: true } : {}),
+      ...(collectedExchanges.length > 0 ? { _artex_exchanges: collectedExchanges } : {}),
+    };
   },
 
   computer,
@@ -703,7 +761,15 @@ const handlers: Record<string, Handler> = {
         out.push(`(corpo indisponível: ${bodyErr ?? "buffer CDP descartado ou sem corpo"})`);
       }
 
-      return text(out.join("\n"));
+      return {
+        ...text(out.join("\n")),
+        ...(args.artex_ingest === true
+          ? (() => {
+              const ex = entryToArtexExchange(entry, bodyBase64 ? "" : (bodyText ?? ""));
+              return { _artex_exchanges: ex ? [ex] : [] };
+            })()
+          : {}),
+      };
     }
     let list = cdp.networkEntries(tabId);
     if (typeof args.url_pattern === "string" && args.url_pattern) list = list.filter((e) => e.url.includes(args.url_pattern as string));
@@ -711,15 +777,51 @@ const handlers: Record<string, Handler> = {
     if (args.include_static !== true) list = list.filter((e) => !["Image", "Font", "Stylesheet", "Media"].includes(e.type ?? ""));
     const limit = typeof args.limit === "number" ? args.limit : 50;
     const shown = list.slice(-limit);
+    let artexExchanges: ArtexExchange[] | undefined;
+    if (args.artex_ingest === true) {
+      const candidates = shown.slice(-50);
+      let fetches = 0;
+      artexExchanges = [];
+      for (const e of candidates) {
+        if (e.body === undefined && !e.bodyBase64 && !e.error && fetches < 10 && /^https?:\/\//i.test(e.url)) {
+          fetches++;
+          try {
+            const res = await cdp.send<{ body: string; base64Encoded: boolean }>(
+              tabId,
+              "Network.getResponseBody",
+              { requestId: e.id },
+            );
+            if (res.base64Encoded) {
+              e.bodyBase64 = true;
+            } else if (typeof res.body === "string") {
+              e.bodyBase64 = false;
+              e.body = res.body.slice(0, ARTEX_MAX_BODY);
+            }
+          } catch {
+            /* fallback silencioso quando buffer CDP foi descartado */
+          }
+        }
+        const ex = entryToArtexExchange(e);
+        if (ex) artexExchanges.push(ex);
+      }
+    }
     if (args.clear === true) cdp.clearNetwork(tabId);
-    if (shown.length === 0) return text("Nenhuma requisição capturada (com esses filtros). A captura começa quando o agente abre/navega a aba.");
+    if (shown.length === 0) {
+      return {
+        ...text("Nenhuma requisição capturada (com esses filtros). A captura começa quando o agente abre/navega a aba."),
+        ...(artexExchanges ? { _artex_exchanges: artexExchanges } : {}),
+      };
+    }
     const lines = shown.map((e) => {
       const status = e.error ? `ERRO ${e.error}` : e.status ? `${e.status}` : e.done ? "?" : "pendente";
       const size = e.size !== undefined ? ` ${Math.max(1, Math.round(e.size / 1024))}KB` : "";
       const url = e.url.length > 160 ? e.url.slice(0, 159) + "…" : e.url;
       return `${e.method} ${status} ${e.type ?? ""}${size} ${url}  [id ${e.id}]`;
     });
-    return text(`${shown.length} de ${list.length} requisição(ões) (use request_id para ver a troca HTTP completa: request/response headers e body):\n${lines.join("\n")}`);
+    return {
+      ...text(`${shown.length} de ${list.length} requisição(ões) (use request_id para ver a troca HTTP completa: request/response headers e body):\n${lines.join("\n")}`),
+      ...(artexExchanges ? { _artex_exchanges: artexExchanges } : {}),
+    };
   },
 
   async file_upload(ctx, args) {
@@ -1402,7 +1504,21 @@ const handlers: Record<string, Handler> = {
         out.push(`\n(response body truncado em ${maxBody} caracteres de ${result.body.length})`);
       }
     }
-    return text(out.join("\n"));
+    const res = text(out.join("\n"));
+    if (args.artex_ingest === true) {
+      res._artex_exchanges = [
+        {
+          method,
+          url: result.url || targetUrl,
+          status: result.status,
+          requestHeaders: sanitizeArtexHeaders(displayReqHeaders),
+          requestBody: (reqBody ?? "").slice(0, ARTEX_MAX_BODY),
+          responseHeaders: sanitizeArtexHeaders(result.headers),
+          responseBody: result.body.slice(0, ARTEX_MAX_BODY),
+        },
+      ];
+    }
+    return res;
   },
 };
 

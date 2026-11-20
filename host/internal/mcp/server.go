@@ -1,9 +1,10 @@
-// Package mcp implementa um servidor MCP mínimo via stdio (JSON-RPC 2.0, uma
-// mensagem por linha) que repassa as chamadas de ferramenta ao native host.
+// Package mcp implementa o servidor MCP do OBA via stdio (JSON-RPC 2.0, uma
+// mensagem por linha) ou Streamable HTTP (--http), repassando as chamadas à extensão.
 package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,17 @@ import (
 )
 
 const defaultProtocol = "2025-06-18"
+
+var supportedProtocols = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+
+func isSupportedProtocol(ver string) bool {
+	for _, s := range supportedProtocols {
+		if ver == s {
+			return true
+		}
+	}
+	return false
+}
 
 // CallTimeout é o limite de uma chamada de ferramenta. A extensão encerra a
 // chamada sozinha antes disso (CALL_DEADLINE_MS em extension/src/tools.ts, que
@@ -50,12 +62,33 @@ type server struct {
 	calls   map[string]context.CancelFunc // id JSON-RPC → cancela a chamada
 }
 
+func newServer(out io.Writer, hub *hubClient) *server {
+	return &server{
+		out:   out,
+		hub:   hub,
+		calls: map[string]context.CancelFunc{},
+	}
+}
+
 func (s *server) write(r response) {
 	r.JSONRPC = "2.0"
 	b, _ := json.Marshal(r)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.out.Write(append(b, '\n'))
+}
+
+func (s *server) cancelAll() {
+	s.callsMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.calls))
+	for k, fn := range s.calls {
+		cancels = append(cancels, fn)
+		delete(s.calls, k)
+	}
+	s.callsMu.Unlock()
+	for _, fn := range cancels {
+		fn()
+	}
 }
 
 // Run atende o protocolo MCP em stdin/stdout até o stdin fechar.
@@ -67,7 +100,7 @@ func Run() error {
 			return err
 		}
 	}
-	s := &server{out: os.Stdout, hub: hub, calls: map[string]context.CancelFunc{}}
+	s := newServer(os.Stdout, hub)
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	var wg sync.WaitGroup
@@ -78,17 +111,25 @@ func Run() error {
 			continue
 		}
 		if req.Method == "tools/call" {
-			wg.Go(func() { s.handle(req) })
+			wg.Go(func() { s.handle(context.Background(), req) })
 			continue
 		}
-		s.handle(req)
+		s.handle(context.Background(), req)
 	}
 	wg.Wait()
 	return sc.Err()
 }
 
-func (s *server) handle(req request) {
-	isNotification := len(req.ID) == 0
+func (s *server) handle(ctx context.Context, req request) {
+	if resp, ok := s.dispatch(ctx, req); ok {
+		s.write(*resp)
+	}
+}
+
+func (s *server) dispatch(ctx context.Context, req request) (*response, bool) {
+	trimmedID := bytes.TrimSpace(req.ID)
+	isNotification := len(trimmedID) == 0 || string(trimmedID) == "null"
+
 	switch req.Method {
 	case "initialize":
 		var p struct {
@@ -97,74 +138,98 @@ func (s *server) handle(req request) {
 				Name string `json:"name"`
 			} `json:"clientInfo"`
 		}
-		json.Unmarshal(req.Params, &p)
+		_ = json.Unmarshal(req.Params, &p)
 		if p.ClientInfo.Name != "" {
 			s.hub.name = p.ClientInfo.Name
 		}
-		version := p.ProtocolVersion
-		if version == "" {
-			version = defaultProtocol
+		version := defaultProtocol
+		if isSupportedProtocol(p.ProtocolVersion) {
+			version = p.ProtocolVersion
 		}
 		instructions := "Controla o navegador do usuário através da extensão OBA. " +
 			"Comece com tabs_context (create_if_empty=true) para obter uma aba do seu grupo."
 		if Stealth {
 			instructions += " Modo CyberSec/stealth ativo: use read_network, cookies, storage, http_headers, intercept_rules e http_repeater para análise e testes ofensivos."
 		}
-		s.write(response{ID: req.ID, Result: map[string]any{
-			"protocolVersion": version,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "oba", "version": config.Version},
-			"instructions":    instructions,
-		}})
+		return &response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]any{
+				"protocolVersion": version,
+				"capabilities":    map[string]any{"tools": map[string]any{}},
+				"serverInfo":      map[string]any{"name": "oba", "version": config.Version},
+				"instructions":    instructions,
+			},
+		}, true
+
+	case "notifications/initialized":
+		return nil, false
+
 	case "notifications/cancelled":
 		var p struct {
 			RequestID json.RawMessage `json:"requestId"`
 		}
-		json.Unmarshal(req.Params, &p)
+		_ = json.Unmarshal(req.Params, &p)
 		s.callsMu.Lock()
 		cancel := s.calls[string(p.RequestID)]
 		s.callsMu.Unlock()
 		if cancel != nil {
 			cancel()
 		}
+		return nil, false
+
 	case "ping":
-		s.write(response{ID: req.ID, Result: map[string]any{}})
+		return &response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}}, true
+
 	case "tools/list":
-		s.write(response{ID: req.ID, Result: map[string]any{"tools": Tools}})
+		return &response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": Tools}}, true
+
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
-			s.write(response{ID: req.ID, Error: &rpcError{-32602, "parâmetros inválidos"}})
-			return
+			return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32602, "parâmetros inválidos"}}, true
 		}
 		if len(p.Arguments) == 0 {
 			p.Arguments = json.RawMessage("{}")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), CallTimeout)
+		cleanArgs, artexOpts := extractArtexCallOpts(p.Name, p.Arguments)
+
+		callCtx, cancel := context.WithTimeout(ctx, CallTimeout)
 		key := string(req.ID)
 		s.callsMu.Lock()
 		s.calls[key] = cancel
 		s.callsMu.Unlock()
-		res, err := s.hub.Call(ctx, p.Name, p.Arguments)
+
+		res, err := s.hub.Call(callCtx, p.Name, cleanArgs)
+
 		s.callsMu.Lock()
 		delete(s.calls, key)
 		s.callsMu.Unlock()
+		if err == nil {
+			res = processArtexIngest(callCtx, res, artexOpts)
+		}
 		cancel()
+
 		if errors.Is(err, context.Canceled) {
-			return // o agente cancelou: pelo MCP, não se responde a um pedido cancelado
+			return nil, false // o agente cancelou: pelo MCP, não se responde a um pedido cancelado
 		}
 		if err != nil {
-			s.write(response{ID: req.ID, Result: toolError(err.Error())})
-			return
+			return &response{JSONRPC: "2.0", ID: req.ID, Result: toolError(err.Error())}, true
 		}
-		s.write(response{ID: req.ID, Result: res})
+		return &response{JSONRPC: "2.0", ID: req.ID, Result: res}, true
+
 	default:
 		if !isNotification {
-			s.write(response{ID: req.ID, Error: &rpcError{-32601, "método não suportado: " + req.Method}})
+			return &response{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &rpcError{-32601, "método não suportado: " + req.Method},
+			}, true
 		}
+		return nil, false
 	}
 }
 

@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,77 @@ type Options struct {
 }
 
 var launchMu sync.Mutex
+
+var versionPartRe = regexp.MustCompile(`(\d+)\.\d+\.\d+`)
+
+// detectChromiumMajor extrai a versão major do executável (ex.: "158") a partir
+// dos diretórios <major>.<minor>.<build>.<patch> ao lado do binário (Windows) ou
+// via `<bin> --version` em sistemas POSIX.
+func detectChromiumMajor(bin string) string {
+	best := 0
+	if entries, err := os.ReadDir(filepath.Dir(bin)); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			parts := strings.Split(e.Name(), ".")
+			if len(parts) < 3 {
+				continue
+			}
+			valid := true
+			for _, p := range parts {
+				if p == "" {
+					valid = false
+					break
+				}
+				for i := 0; i < len(p); i++ {
+					if p[i] < '0' || p[i] > '9' {
+						valid = false
+						break
+					}
+				}
+				if !valid {
+					break
+				}
+			}
+			if !valid {
+				continue
+			}
+			if maj, err := strconv.Atoi(parts[0]); err == nil && maj > best {
+				best = maj
+			}
+		}
+	}
+	if best > 0 {
+		return strconv.Itoa(best)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, bin, "--version").Output(); err == nil {
+		if m := versionPartRe.FindStringSubmatch(string(out)); len(m) > 1 {
+			return m[1]
+		}
+	}
+	return "136"
+}
+
+// buildCleanUserAgent gera um User-Agent padrão (sem "Headless") com a mesma
+// versão major do navegador detectado, permitindo override via OBA_USER_AGENT.
+func buildCleanUserAgent(bin string) string {
+	if custom := strings.TrimSpace(os.Getenv("OBA_USER_AGENT")); custom != "" {
+		return custom
+	}
+	major := detectChromiumMajor(bin)
+	switch runtime.GOOS {
+	case "windows":
+		return fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36", major)
+	case "darwin":
+		return fmt.Sprintf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36", major)
+	default:
+		return fmt.Sprintf("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36", major)
+	}
+}
 
 func canDial(port int) bool {
 	if port <= 0 {
@@ -252,6 +325,7 @@ func EnsureRunning(ctx context.Context, opts Options) (config.HostInfo, error) {
 		"--load-extension=" + extDir,
 		"--disable-extensions-except=" + extDir,
 		"--disable-blink-features=AutomationControlled",
+		"--user-agent=" + buildCleanUserAgent(bBin),
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--disable-popup-blocking",

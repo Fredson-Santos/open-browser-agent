@@ -54,6 +54,11 @@ func main() {
 		cybersec := fs.Bool("cybersec", false, "ativa modo CyberSec/stealth (zero popups, sem overlay, leitura irrestrita); exige também OBA_CYBERSEC=1 e `oba install --cybersec`")
 		extDir := fs.String("extension-dir", "", "caminho para extension/dist (ou OBA_EXT_DIR)")
 		proxy := fs.String("proxy", "", "proxy HTTP para o navegador headless (ou OBA_PROXY, ex.: http://127.0.0.1:8788)")
+		httpAddr := fs.String("http", os.Getenv("OBA_HTTP"), "expõe MCP Streamable HTTP em <addr> (ex.: 127.0.0.1:8789) em /mcp em vez de stdio (ou OBA_HTTP)")
+		httpToken := fs.String("http-token", os.Getenv("OBA_HTTP_TOKEN"), "token Bearer exigido em Authorization para --http (ou OBA_HTTP_TOKEN)")
+		artexURL := fs.String("artex-url", os.Getenv("OBA_ARTEX_URL"), "URL base do ARTEX para ingest de tráfego em /api/traffic/ingest (ou OBA_ARTEX_URL)")
+		artexToken := fs.String("artex-token", os.Getenv("OBA_ARTEX_TOKEN"), "token JWT Bearer do ARTEX para /api/traffic/ingest (ou OBA_ARTEX_TOKEN)")
+		artexInsecure := fs.Bool("artex-insecure", envBool("OBA_ARTEX_INSECURE"), "ignora erros de certificado TLS ao enviar tráfego para --artex-url (ou OBA_ARTEX_INSECURE=1)")
 		fs.Parse(os.Args[2:])
 		if *useHeadless && !*cybersec {
 			fmt.Fprintln(os.Stderr, "erro: --headless exige --cybersec (com OBA_CYBERSEC=1 e `oba install --cybersec`): no modo headless não há janela visível para aprovar popups de permissão.")
@@ -71,6 +76,10 @@ func main() {
 			mcp.Stealth = true
 		}
 		mcp.Headless = *useHeadless
+		mcp.HTTPToken = *httpToken
+		mcp.ArtexURL = *artexURL
+		mcp.ArtexToken = *artexToken
+		mcp.ArtexInsecure = *artexInsecure
 		if *extDir != "" {
 			mcp.ExtensionDir = *extDir
 		}
@@ -83,7 +92,11 @@ func main() {
 		if *session != "" {
 			mcp.Session = *session
 		}
-		err = mcp.Run()
+		if *httpAddr != "" {
+			err = mcp.RunHTTP(*httpAddr)
+		} else {
+			err = mcp.Run()
+		}
 	case "install":
 		fs := flag.NewFlagSet("install", flag.ExitOnError)
 		ids := fs.String("extension-id", "", "IDs extras de extensão autorizados, separados por vírgula")

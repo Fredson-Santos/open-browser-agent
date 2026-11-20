@@ -129,6 +129,23 @@ const STEALTH_INIT_SCRIPT = `(() => {
   } catch {}
 })();`;
 
+export function cleanStealthUserAgent(raw = navigator.userAgent): string {
+  return raw
+    .replace(/HeadlessChrome\//gi, "Chrome/")
+    .replace(/Headless/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+async function applyStealthUserAgent(tabId: number): Promise<void> {
+  if (extraTabHeaders.get(tabId)?.userAgent !== undefined) return;
+  const clean = cleanStealthUserAgent(navigator.userAgent);
+  if (!clean) return;
+  await chrome.debugger
+    .sendCommand({ tabId }, "Network.setUserAgentOverride", { userAgent: clean })
+    .catch(() => {});
+}
+
 export function setStealthTab(tabId: number, enabled: boolean): void {
   if (enabled) {
     stealthTabs.add(tabId);
@@ -137,6 +154,7 @@ export function setStealthTab(tabId: number, enabled: boolean): void {
       void chrome.debugger
         .sendCommand({ tabId }, "Page.addScriptToEvaluateOnNewDocument", { source: STEALTH_INIT_SCRIPT })
         .catch(() => {});
+      void applyStealthUserAgent(tabId);
     }
   } else {
     stealthTabs.delete(tabId);
@@ -659,6 +677,9 @@ async function attach(tabId: number): Promise<void> {
   if (isStealth) {
     stealthScriptRegistered.add(tabId);
     await cmd("Page.addScriptToEvaluateOnNewDocument", { source: STEALTH_INIT_SCRIPT });
+    if (hdrs?.userAgent === undefined) {
+      await applyStealthUserAgent(tabId);
+    }
   }
   // Faz a página se comportar como focada mesmo com o usuário em outra janela
   // (ex.: no terminal do agente); sem isso, foco e digitação podem falhar.
@@ -789,7 +810,11 @@ export async function setTabHeaders(
 
   let nextUA = prev?.userAgent;
   if (opts.userAgent !== undefined) {
-    await send(tabId, "Network.setUserAgentOverride", { userAgent: opts.userAgent });
+    const appliedUA =
+      opts.userAgent === ""
+        ? (stealthTabs.has(tabId) ? cleanStealthUserAgent(navigator.userAgent) : "")
+        : opts.userAgent;
+    await send(tabId, "Network.setUserAgentOverride", { userAgent: appliedUA });
     nextUA = opts.userAgent === "" ? undefined : opts.userAgent;
   }
 
@@ -812,7 +837,8 @@ export async function clearTabHeaders(tabId: number): Promise<void> {
   const prev = extraTabHeaders.get(tabId);
   await send(tabId, "Network.setExtraHTTPHeaders", { headers: {} });
   if (prev?.userAgent !== undefined) {
-    await send(tabId, "Network.setUserAgentOverride", { userAgent: "" });
+    const restoredUA = stealthTabs.has(tabId) ? cleanStealthUserAgent(navigator.userAgent) : "";
+    await send(tabId, "Network.setUserAgentOverride", { userAgent: restoredUA });
   }
   extraTabHeaders.delete(tabId);
 }

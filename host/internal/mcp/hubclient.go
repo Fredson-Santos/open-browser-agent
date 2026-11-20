@@ -192,6 +192,18 @@ func (h *hubClient) EnsureReady() error {
 	return err
 }
 
+// Close encerra a conexão TCP atual com o native host, se houver.
+func (h *hubClient) Close() error {
+	h.mu.Lock()
+	conn := h.conn
+	h.conn = nil
+	h.mu.Unlock()
+	if conn != nil {
+		return conn.Close()
+	}
+	return nil
+}
+
 // Probe verifica se o native host aceita uma conexão autenticada.
 func Probe() error {
 	h := newHubClient("oba status")

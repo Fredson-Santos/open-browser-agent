@@ -410,6 +410,18 @@
           "description": "Limpa o buffer depois de ler.",
           "type": "boolean"
         },
+        "artex_ingest": {
+          "description": "Se true, envia a(s) troca(s) HTTP capturada(s) para o cofre de evidências do ARTEX (POST /api/traffic/ingest), usando --artex-url/--artex-token ou OBA_ARTEX_URL/OBA_ARTEX_TOKEN.",
+          "type": "boolean"
+        },
+        "artex_token": {
+          "description": "JWT Bearer do ARTEX (opcional; sobrescreve --artex-token / OBA_ARTEX_TOKEN).",
+          "type": "string"
+        },
+        "artex_url": {
+          "description": "URL base do ARTEX (opcional; sobrescreve --artex-url / OBA_ARTEX_URL).",
+          "type": "string"
+        },
         "include_static": {
           "description": "Inclui imagens, fontes, CSS e mídia.",
           "type": "boolean"
@@ -859,6 +871,18 @@
     "description": "Estilo Burp Repeater: reenvia uma requisição capturada pelo read_network (via request_id) ou cria uma requisição do zero no contexto autenticado da aba (com cookies e sessão do navegador), permitindo modificar método, URL, headers e body.",
     "inputSchema": {
       "properties": {
+        "artex_ingest": {
+          "description": "Se true, envia a troca HTTP resultante para o cofre de evidências do ARTEX (POST /api/traffic/ingest), usando --artex-url/--artex-token ou OBA_ARTEX_URL/OBA_ARTEX_TOKEN.",
+          "type": "boolean"
+        },
+        "artex_token": {
+          "description": "JWT Bearer do ARTEX (opcional; sobrescreve --artex-token / OBA_ARTEX_TOKEN).",
+          "type": "string"
+        },
+        "artex_url": {
+          "description": "URL base do ARTEX (opcional; sobrescreve --artex-url / OBA_ARTEX_URL).",
+          "type": "string"
+        },
         "body": {
           "description": "Corpo da requisição (substitui o postData original, se houver).",
           "type": "string"
