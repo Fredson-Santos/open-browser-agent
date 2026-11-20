@@ -5,6 +5,7 @@ import { Agent } from "../agent/loop";
 import { CHAT_SESSION, type ChatItem, K, type SessionView } from "../store";
 import { toHtml } from "./markdown";
 import * as nav from "./nav";
+import "./modelmenu"; // seletor de modelo do chip (registra os próprios eventos)
 import * as settings from "./settings";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -280,7 +281,6 @@ $("clear-chat").addEventListener("click", async () => {
 });
 $("open-history").addEventListener("click", () => nav.show("history"));
 $("open-settings").addEventListener("click", () => nav.show("settings"));
-$("model-chip").addEventListener("click", () => nav.show("settings"));
 $("open-control").addEventListener("click", () => nav.show("control"));
 
 // Aba em que o agente vai agir (a ativa nesta janela).

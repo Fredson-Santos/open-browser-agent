@@ -17,7 +17,7 @@ export type Content =
 export type ToolResult = { content: Content[]; isError?: boolean };
 
 /** `call` identifica a chamada para o host poder cancelá-la (ver abortCall). */
-export type Ctx = { session: string; client: string; call?: string };
+export type Ctx = { session: string; client: string; call?: string; signal?: AbortSignal };
 type Args = Record<string, unknown>;
 type Handler = (ctx: Ctx, args: Args) => Promise<ToolResult>;
 
@@ -131,6 +131,64 @@ async function screenshotResult(tab: chrome.tabs.Tab, format: "jpeg" | "png", pr
   };
 }
 
+// ---------------------------------------------------------------- wait_for
+
+// Conexões longas não contam para "rede ociosa".
+const LONG_LIVED = new Set(["WebSocket", "EventSource", "Ping"]);
+
+function pendingRequests(tabId: number): number {
+  const now = Date.now();
+  // Pedidos abertos há mais de 15s são long polling/streams: ignorados.
+  return cdp.networkEntries(tabId).filter((e) => !e.done && !LONG_LIVED.has(e.type ?? "") && now - e.t < 15_000).length;
+}
+
+/**
+ * Espera uma condição da página em vez de um tempo fixo: texto aparecer
+ * (text), texto sumir (text_gone, ex.: "Carregando") e/ou rede ociosa por
+ * 500 ms (network_idle). Sem condição, espera a rede ficar ociosa.
+ */
+async function waitFor(tabId: number, args: Args): Promise<{ ok: boolean; msg: string }> {
+  const want = typeof args.text === "string" && args.text.trim() ? args.text.trim() : undefined;
+  const gone = typeof args.text_gone === "string" && args.text_gone.trim() ? args.text_gone.trim() : undefined;
+  const idle = args.network_idle === true || (!want && !gone);
+  const timeout = Math.min(Math.max(Number(args.timeout ?? 15), 0.5), 60) * 1000;
+  if (idle) await cdp.track(tabId);
+
+  const start = Date.now();
+  let idleSince = 0;
+  const met = { text: !want, gone: !gone, idle: !idle };
+  while (true) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status === "complete") {
+      try {
+        if (want) met.text = await page.call<boolean>(tabId, "hasText", want);
+        if (gone) met.gone = !(await page.call<boolean>(tabId, "hasText", gone));
+      } catch {
+        /* página trocando: tenta de novo */
+      }
+    }
+    if (idle) {
+      if (pendingRequests(tabId) === 0) {
+        idleSince ||= Date.now();
+        met.idle = Date.now() - idleSince >= 500;
+      } else {
+        idleSince = 0;
+        met.idle = false;
+      }
+    }
+    const secs = ((Date.now() - start) / 1000).toFixed(1);
+    if (met.text && met.gone && met.idle) {
+      const what = [want && `"${want}" apareceu`, gone && `"${gone}" sumiu`, idle && "rede ociosa"].filter(Boolean).join(", ");
+      return { ok: true, msg: `Pronto em ${secs}s: ${what}.` };
+    }
+    if (Date.now() - start >= timeout) {
+      const missing = [!met.text && `"${want}" não apareceu`, !met.gone && `"${gone}" continua na página`, !met.idle && `rede ainda ocupada (${pendingRequests(tabId)} pedido(s))`].filter(Boolean).join("; ");
+      return { ok: false, msg: `Tempo esgotado após ${secs}s: ${missing}. Confira a página com screenshot ou get_page_text.` };
+    }
+    await sleep(250);
+  }
+}
+
 // ---------------------------------------------------------------- computer
 
 function coord(v: unknown, label = "coordinate"): [number, number] {
@@ -180,6 +238,7 @@ async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
   // Um clique que abre alert/confirm deixa o comando CDP pendurado até alguém
   // responder ao diálogo: corre contra o evento de abertura e devolve na hora.
   const watcher = cdp.waitDialog(tabId);
+  const children = NAV_ACTIONS.has(action) ? await openedBy(tabId) : new Set<number>();
   try {
     const raced = await Promise.race([
       computerAction(tab, action, args),
@@ -190,10 +249,49 @@ async function computer(ctx: Ctx, args: Args): Promise<ToolResult> {
       return text(`${action} executado. A página abriu um diálogo ${d.type}: "${d.message}". ` +
         `Ela fica bloqueada até você responder com handle_dialog (accept=true/false${d.type === "prompt" ? ", prompt_text" : ""}).`);
     }
+    if (NAV_ACTIONS.has(action)) {
+      const note = await navigationNote(ctx, tabId, tab.url, children);
+      if (note) raced.content.push({ type: "text", text: note });
+    }
     return raced;
   } finally {
     watcher.cancel();
   }
+}
+
+// Ações que podem levar a outra página (link, submit, Enter…).
+const NAV_ACTIONS = new Set(["left_click", "middle_click", "double_click", "key", "type"]);
+
+async function openedBy(tabId: number): Promise<Set<number>> {
+  const all = await chrome.tabs.query({}).catch(() => []);
+  return new Set(all.filter((t) => t.openerTabId === tabId).map((t) => t.id!));
+}
+
+/**
+ * Conta ao agente se a ação mudou a URL (navegação ou pushState de SPA) ou
+ * abriu abas (target=_blank); as abas novas entram no grupo da sessão.
+ */
+async function navigationNote(ctx: Ctx, tabId: number, before: string | undefined, children: Set<number>): Promise<string> {
+  await sleep(200);
+  const after = await chrome.tabs.get(tabId).catch(() => undefined);
+  if (!after) return "";
+  const notes: string[] = [];
+  if (after.url && after.url !== before) {
+    notes.push(`A página mudou: ${after.url}${after.status === "loading" ? " (ainda carregando; use wait_for)" : ""}. Refs antigos podem ter expirado.`);
+  } else if (after.status === "loading") {
+    notes.push("A página começou a carregar; use wait_for antes de ler.");
+  }
+  for (const id of await openedBy(tabId)) {
+    if (children.has(id)) continue;
+    const child = await chrome.tabs.get(id).catch(() => undefined);
+    if (!child || child.windowId !== after.windowId) {
+      notes.push(`A ação abriu uma janela separada (tab_id ${id}), fora do grupo desta sessão.`);
+      continue;
+    }
+    const t = await sessions.adoptTab(ctx.session, ctx.client, id).catch(() => undefined);
+    if (t) notes.push(`Abriu uma aba nova no grupo: tab_id ${t.id} (${t.pendingUrl || t.url}).`);
+  }
+  return notes.join("\n");
 }
 
 async function computerAction(tab: chrome.tabs.Tab, action: string, args: Args): Promise<ToolResult> {
@@ -337,8 +435,9 @@ const handlers: Record<string, Handler> = {
         await chrome.tabs.update(tabId, { url: normalizeUrl(dest) });
     }
     const loaded = await done;
+    let note = loaded ? "" : "\n(aviso: o carregamento não terminou em 30s)";
+    if (args.wait_for !== undefined) note += `\n${(await waitFor(tabId, args.wait_for === true ? {} : typeof args.wait_for === "string" ? { text: args.wait_for } : (args.wait_for as Args))).msg}`;
     const fresh = await chrome.tabs.get(tabId);
-    const note = loaded ? "" : "\n(aviso: o carregamento não terminou em 30s)";
     return text(`Navegou para ${fresh.url}\nTítulo: ${fresh.title}${note}`);
   },
 
@@ -366,7 +465,52 @@ const handlers: Record<string, Handler> = {
 
   async get_page_text(ctx, args) {
     const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
-    return text(await page.call<string>(tab.id!, "pageText"));
+    return text(await page.call<string>(tab.id!, "pageText", {
+      max_chars: typeof args.max_chars === "number" ? args.max_chars : undefined,
+      offset: typeof args.offset === "number" ? args.offset : undefined,
+      ref_id: typeof args.ref_id === "string" && args.ref_id ? args.ref_id : undefined,
+    }));
+  },
+
+  async wait_for(ctx, args) {
+    const tab = await sessions.ownedTab(ctx.session, ctx.client, args.tab_id);
+    const r = await waitFor(tab.id!, args);
+    return { ...text(r.msg), ...(r.ok ? {} : { isError: true }) };
+  },
+
+  async batch(ctx, args) {
+    const steps = Array.isArray(args.actions) ? args.actions : [];
+    if (steps.length === 0) throw new Error("actions é obrigatório: lista de {tool, args}.");
+    if (steps.length > 30) throw new Error("no máximo 30 ações por batch.");
+    const stopOnError = args.stop_on_error !== false;
+    const content: Content[] = [];
+    let failed = 0;
+    // Etapas rodam sem o id da chamada externa (cancelá-la cancela o batch inteiro pelo sinal).
+    const inner: Ctx = { session: ctx.session, client: ctx.client, signal: ctx.signal };
+    for (const [i, raw] of steps.entries()) {
+      if (ctx.signal?.aborted) break;
+      const step = (raw ?? {}) as { tool?: unknown; args?: unknown };
+      const name = String(step.tool ?? "");
+      const stepArgs = { ...((step.args as Args | undefined) ?? {}) };
+      // tab_id do batch vale para as ações que não informam o seu.
+      if (stepArgs.tab_id === undefined && typeof args.tab_id === "number") stepArgs.tab_id = args.tab_id;
+      let r: ToolResult;
+      if (name === "batch") r = errorResult("batch não pode conter outro batch.");
+      else if (!handlers[name]) r = errorResult(`ferramenta desconhecida: ${name}`);
+      else r = await execute(handlers[name], name, inner, stepArgs);
+      const err = r.isError ? r.content.find((c) => c.type === "text")?.text : undefined;
+      await log({ t: Date.now(), client: ctx.client, tool: `batch › ${name}`, detail: summarize(name, stepArgs), ok: !r.isError, error: err?.slice(0, 200) });
+      content.push({ type: "text", text: `── ${i + 1}. ${name} ${summarize(name, stepArgs)}${r.isError ? " ✗" : ""}` });
+      content.push(...r.content);
+      if (r.isError) {
+        failed++;
+        if (stopOnError) {
+          if (i + 1 < steps.length) content.push({ type: "text", text: `(parou no erro; ${steps.length - i - 1} ação(ões) não executada(s))` });
+          break;
+        }
+      }
+    }
+    return { content, ...(failed && stopOnError ? { isError: true } : {}) };
   },
 
   computer,
@@ -619,6 +763,7 @@ async function log(entry: LogEntry): Promise<void> {
 export async function run(name: string, ctx: Ctx, args: Args): Promise<ToolResult> {
   args ??= {};
   const handler = handlers[name];
+  const revived = await sessions.revive(ctx.session);
   let result: ToolResult;
   if (!handler) {
     result = errorResult(`ferramenta desconhecida: ${name}`);
@@ -627,14 +772,28 @@ export async function run(name: string, ctx: Ctx, args: Args): Promise<ToolResul
   } else {
     result = await execute(handler, name, ctx, args);
   }
+  if (revived) {
+    result.content.unshift({ type: "text", text: "(Sessão retomada: as abas abertas pelo processo anterior deste agente continuam no grupo; tabs_context lista os tab_id.)" });
+  }
   const err = result.isError ? result.content.find((c) => c.type === "text")?.text : undefined;
   await log({ t: Date.now(), client: ctx.client, tool: name, detail: summarize(name, args), ok: !result.isError, error: err?.slice(0, 200) });
   return result;
 }
 
 async function execute(handler: Handler, name: string, ctx: Ctx, args: Args): Promise<ToolResult> {
-  let reject!: (e: Error) => void;
-  const aborted = new Promise<never>((_, r) => (reject = r));
+  let rejectRace!: (e: Error) => void;
+  const aborted = new Promise<never>((_, r) => (rejectRace = r));
+  // O sinal avisa handlers de várias etapas (batch) para não começar a próxima.
+  const ac = new AbortController();
+  const reject = (e: Error) => {
+    ac.abort(e);
+    rejectRace(e);
+  };
+  // Etapa de um batch: cancelar o batch interrompe também a etapa em andamento.
+  const parent = ctx.signal;
+  const onParentAbort = () => reject(parent!.reason instanceof Error ? parent!.reason : new Error("Chamada cancelada."));
+  parent?.addEventListener("abort", onParentAbort, { once: true });
+  ctx = { ...ctx, signal: ac.signal };
   const set = inflight.get(ctx.session) ?? new Set();
   set.add(reject);
   inflight.set(ctx.session, set);
@@ -660,6 +819,7 @@ async function execute(handler: Handler, name: string, ctx: Ctx, args: Args): Pr
   } catch (e) {
     return errorResult(e);
   } finally {
+    parent?.removeEventListener("abort", onParentAbort);
     clearTimeout(deadline);
     set.delete(reject);
     if (ctx.call) calls.delete(ctx.call);

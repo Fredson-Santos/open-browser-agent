@@ -190,9 +190,23 @@ export async function setStopped(id: string, stopped: boolean): Promise<void> {
   }
 }
 
-/** Agente desconectou: remove indicadores e solta o depurador das abas dele. */
+/**
+ * Agente desconectou: remove indicadores e solta o depurador das abas dele.
+ * O grupo continua ligado ao id da sessão: o host dá o mesmo id a um novo
+ * processo com a mesma chave (mesmo agente, mesmo projeto), que retoma as abas.
+ * Aprovações e sites liberados "só nesta sessão" valem para o processo e não passam adiante.
+ */
 export async function close(id: string): Promise<void> {
-  const s = await forget(id);
+  const s = await locked(async () => {
+    const store = await load();
+    const s = store[id];
+    if (!s) return undefined;
+    const g = await liveGroup(s);
+    if (g) store[id] = { client: s.client, groupId: g.id, disconnected: true };
+    else delete store[id];
+    await save(store);
+    return g ? s : undefined;
+  });
   if (!s) return;
   for (const tab of await groupTabs(s)) {
     await overlay.remove(tab.id!);
@@ -200,6 +214,33 @@ export async function close(id: string): Promise<void> {
   }
   const g = await liveGroup(s);
   if (g) await chrome.tabGroups.update(g.id, { title: `OBA · ${s.client} (desconectado)`, color: "grey" });
+}
+
+/** O usuário fechou o grupo de uma sessão desconectada: não há mais o que retomar. */
+export function groupRemoved(groupId: number): Promise<void> {
+  return locked(async () => {
+    const store = await load();
+    const ids = Object.keys(store).filter((id) => store[id].disconnected && store[id].groupId === groupId);
+    if (ids.length === 0) return;
+    for (const id of ids) delete store[id];
+    await save(store);
+  });
+}
+
+/** Primeira chamada de um processo que retomou a sessão: o grupo volta a ficar ativo. */
+export async function revive(id: string): Promise<boolean> {
+  const s = await locked(async () => {
+    const store = await load();
+    const s = store[id];
+    if (!s?.disconnected) return undefined;
+    delete s.disconnected;
+    await save(store);
+    return s;
+  });
+  if (!s) return false;
+  const g = await liveGroup(s);
+  if (g) await chrome.tabGroups.update(g.id, { title: `OBA · ${s.client}`, color: "cyan" });
+  return !!g;
 }
 
 /** Remove a sessão do armazenamento e devolve o que ela era. */
@@ -238,8 +279,12 @@ export async function release(id: string): Promise<void> {
   if (ids.length) await chrome.tabs.ungroup(ids as [number, ...number[]]).catch(() => {});
 }
 
-/** Novo native host = sessões MCP antigas não existem mais (o chat embutido não depende do host). */
+/**
+ * Novo native host = os processos das sessões MCP antigas não estão mais
+ * conectados (o chat embutido não depende do host). Os grupos ficam esperando
+ * retomada, como num close.
+ */
 export async function reset(): Promise<void> {
   const store = await load();
-  await Promise.all(Object.keys(store).filter((id) => id !== CHAT_SESSION).map(close));
+  await Promise.all(Object.keys(store).filter((id) => id !== CHAT_SESSION && !store[id].disconnected).map(close));
 }

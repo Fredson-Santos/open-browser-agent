@@ -6,9 +6,12 @@ import "encoding/json"
 
 // Cliente → host (JSON por linha, via TCP 127.0.0.1).
 type ClientMsg struct {
-	Type   string          `json:"type"` // "hello" | "call" | "cancel"
-	Token  string          `json:"token,omitempty"`
-	Client string          `json:"client,omitempty"`
+	Type   string `json:"type"` // "hello" | "call" | "cancel"
+	Token  string `json:"token,omitempty"`
+	Client string `json:"client,omitempty"`
+	// Resume (no hello) é a chave estável da sessão: o host deriva dela o id,
+	// e a extensão reencontra o grupo de abas de um processo anterior.
+	Resume string          `json:"resume,omitempty"`
 	ID     int64           `json:"id,omitempty"`
 	Tool   string          `json:"tool,omitempty"`
 	Args   json.RawMessage `json:"args,omitempty"`

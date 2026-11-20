@@ -60,7 +60,9 @@ func (s *server) write(r response) {
 
 // Run atende o protocolo MCP em stdin/stdout até o stdin fechar.
 func Run() error {
-	s := &server{out: os.Stdout, hub: newHubClient("agente"), calls: map[string]context.CancelFunc{}}
+	hub := newHubClient("agente")
+	hub.resume = true
+	s := &server{out: os.Stdout, hub: hub, calls: map[string]context.CancelFunc{}}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	var wg sync.WaitGroup

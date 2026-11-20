@@ -60,6 +60,8 @@ export type SessionView = {
   approved?: boolean;
   denied?: boolean;
   sites?: string[];
+  /** o processo do agente saiu; o grupo espera um novo processo com a mesma chave */
+  disconnected?: boolean;
 };
 
 /** Chat embutido: qualquer API compatível com OpenAI (NVIDIA, OpenRouter, Ollama…). */
@@ -69,7 +71,7 @@ export type ChatConfig = {
   model: string;
   /** envia screenshots ao modelo (só funciona com modelos com visão) */
   vision: boolean;
-  /** limite de chamadas ao modelo por pedido */
+  /** limite de chamadas ao modelo por pedido; 0 = sem limite */
   maxSteps: number;
 };
 export const DEFAULT_CHAT_CONFIG: ChatConfig = {

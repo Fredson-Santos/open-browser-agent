@@ -61,12 +61,13 @@ Clientes com configuração JSON:
 | `tabs_context` | Lista as abas do grupo da sessão (`create_if_empty` cria uma) |
 | `tabs_create` | Cria aba no grupo, opcionalmente com URL |
 | `tabs_close` | Fecha aba do grupo |
-| `navigate` | URL, `back`, `forward` ou `reload`, esperando o carregamento |
+| `navigate` | URL, `back`, `forward` ou `reload`, esperando o carregamento; `wait_for` espera também o conteúdo |
 | `screenshot` | Captura a viewport, redimensionada para pixels CSS (= coordenadas do `computer`) |
 | `read_page` | Árvore `role "nome" [ref_N]`; `filter: "interactive"`, `ref_id`, `max_depth` |
-| `find` | Busca local por texto/rótulo/tipo (`"botão entrar"`), sem LLM |
-| `get_page_text` | Texto legível (prioriza `<article>`/`<main>`) |
-| `computer` | Cliques, hover, arraste, `type`, `key` (`"ctrl+a Delete"`), scroll, `scroll_to`, `wait`, screenshot — alvo por `ref` ou `coordinate` |
+| `find` | Busca local por texto/rótulo/tipo (`"botão entrar"`), sem LLM; nome exato > começa com > contém, e a palavra de tipo só desempata |
+| `get_page_text` | Texto legível (prioriza `<article>`/`<main>`) com texto de imagens (`[img: Localiza]`); `max_chars`/`offset` para paginar, `ref_id` para um trecho |
+| `wait_for` | Espera um texto aparecer (`text`), sumir (`text_gone`) e/ou a rede ficar ociosa (`network_idle`), em vez de esperas fixas |
+| `computer` | Cliques, hover, arraste, `type`, `key` (`"ctrl+a Delete"`), scroll, `scroll_to`, `wait`, screenshot — alvo por `ref` ou `coordinate`. Avisa se a ação mudou a URL ou abriu aba (que entra no grupo) |
 | `form_input` | Define select (pelo texto da opção), checkbox/radio, texto, data… disparando os eventos que React/Vue esperam |
 | `handle_dialog` | Responde a `alert`/`confirm`/`prompt` nativos (a ação que os abre volta na hora avisando) |
 | `read_console` | Console da aba: logs, warnings, erros e exceções não tratadas (filtro por regex) |
@@ -74,6 +75,7 @@ Clientes com configuração JSON:
 | `file_upload` | Anexa arquivos locais a um `<input type="file">` — o usuário confirma cada envio |
 | `gif_creator` | Grava as ações como GIF (com o ponto do clique e legenda) em `Downloads/oba` |
 | `javascript` | Executa JS na página — **desligado por padrão**, ativado no side panel |
+| `batch` | Até 30 ferramentas em sequência numa chamada (ex.: `navigate` → `wait_for` → `get_page_text`); para no primeiro erro. Só para agentes MCP |
 
 O motor de percepção (`src/content`) é injetado sob demanda via `chrome.scripting`:
 percorre shadow DOM aberto e iframes de mesma origem, detecta elementos
@@ -81,6 +83,19 @@ clicáveis sem role (`cursor: pointer`, `onclick`, `tabindex`), ignora ocultos e
 substitui valores de senha, cartão e OTP por `[value redacted]`. Os refs usam
 `WeakRef` e expiram quando a página muda. Mouse e teclado usam CDP
 (`Input.dispatch*`), gerando eventos com `isTrusted = true`.
+
+## Sessões retomáveis
+
+Cada processo `oba mcp` envia uma chave de sessão: por padrão o nome do agente +
+o diretório em que ele roda (o projeto). O host transforma a chave num id
+estável, e a extensão liga o grupo de abas a esse id. Se o agente reinicia no
+mesmo projeto, o processo novo retoma o grupo, e as abas continuam com os mesmos
+`tab_id`. Ao desconectar, o grupo fica cinza ("desconectado") esperando.
+Aprovações e sites liberados "só nesta sessão" não passam para o processo novo.
+
+- Outra chave: `oba mcp --session <chave>` ou `OBA_SESSION=<chave>`.
+- Dois processos com a mesma chave ao mesmo tempo ficam com grupos separados.
+- Fechar o grupo encerra a sessão de vez.
 
 ## Indicadores visuais e botão Parar
 
@@ -131,7 +146,7 @@ Como funciona:
   e outros sites passam pelas permissões normais.
 - O loop roda no side panel (`src/agent`). Ele chama `/chat/completions`, executa
   as `tool_calls` pelas mesmas ferramentas dos agentes MCP e repete até o modelo
-  responder só com texto (limite de 30 passos). **Parar** (no chat ou na página)
+  responder só com texto (30 passos por padrão; ajustável ou sem limite em Configurações). **Parar** (no chat ou na página)
   interrompe; fechar o painel também.
 - Ao fim de cada pedido o depurador e o overlay saem da aba (some a barra
   "está depurando"); o grupo fica enquanto a conversa estiver aberta. Trocar de

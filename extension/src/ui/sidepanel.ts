@@ -59,16 +59,17 @@ async function renderSessions() {
   const ul = h("ul");
   for (const [id, s] of entries) {
     const tabs = s.groupId !== undefined ? await chrome.tabs.query({ groupId: s.groupId }).catch(() => []) : [];
-    const state = s.denied ? "recusado" : s.stopped ? "pausado" : "ativo";
+    if (s.disconnected && tabs.length === 0) continue;
+    const state = s.disconnected ? "desconectado (retoma ao reabrir o agente)" : s.denied ? "recusado" : s.stopped ? "pausado" : "ativo";
     const btn = h("button", { class: "small" + (s.stopped ? "" : " danger") }, s.stopped ? "Retomar" : "Parar");
     btn.addEventListener("click", () => chrome.runtime.sendMessage({ type: "OBA_SESSION", session: id, stop: !s.stopped }));
     ul.append(
       h(
         "li",
         {},
-        h("span", { class: `dot ${s.stopped || s.denied ? "err" : "ok"}` }),
+        h("span", { class: `dot ${s.stopped || s.denied ? "err" : s.disconnected ? "" : "ok"}` }),
         h("div", { class: "main" }, h("div", { class: "name" }, s.client), h("small", {}, `${state} · ${tabs.length} aba(s)`)),
-        s.denied ? null : btn,
+        s.denied || s.disconnected ? null : btn,
       ),
     );
   }

@@ -5,7 +5,9 @@ package hub
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -131,6 +133,21 @@ func (h *Hub) accept(ln net.Listener) {
 	}
 }
 
+// sessionID deriva um id estável da chave de retomada, para a extensão
+// reencontrar o grupo de abas de um processo anterior com a mesma chave. Se
+// outro cliente com a mesma chave ainda estiver conectado (dois agentes no
+// mesmo projeto), cada um fica com sua sessão. Chamar com h.mu travado.
+func (h *Hub) sessionID(resume string) string {
+	if resume != "" {
+		sum := sha256.Sum256([]byte(resume))
+		id := "r" + hex.EncodeToString(sum[:6])
+		if _, busy := h.clients[id]; !busy {
+			return id
+		}
+	}
+	return fmt.Sprintf("s%d", h.seq.Add(1))
+}
+
 func (h *Hub) serve(conn net.Conn) {
 	defer conn.Close()
 	sc := bufio.NewScanner(conn)
@@ -151,14 +168,19 @@ func (h *Hub) serve(conn net.Conn) {
 	if name == "" {
 		name = "agente"
 	}
-	c := &client{session: fmt.Sprintf("s%d", h.seq.Add(1)), name: name, conn: conn}
+	c := &client{name: name, conn: conn}
 	h.mu.Lock()
+	c.session = h.sessionID(hello.Resume)
 	h.clients[c.session] = c
 	h.mu.Unlock()
 	log.Printf("cliente %q conectado (sessão %s)", name, c.session)
 	c.send(wire.HostMsg{Type: "welcome", Session: c.session})
 
 	defer func() {
+		// Avisa a extensão antes de liberar o id: um processo novo com a mesma
+		// chave só o recebe depois, então o fechamento nunca chega atrasado
+		// e derruba a sessão retomada.
+		h.ext.Send(wire.ExtMsg{Type: "session_closed", Session: c.session})
 		h.mu.Lock()
 		delete(h.clients, c.session)
 		for k, p := range h.pending {
@@ -167,7 +189,6 @@ func (h *Hub) serve(conn net.Conn) {
 			}
 		}
 		h.mu.Unlock()
-		h.ext.Send(wire.ExtMsg{Type: "session_closed", Session: c.session})
 		log.Printf("cliente %q desconectou (sessão %s)", name, c.session)
 	}()
 

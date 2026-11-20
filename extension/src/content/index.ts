@@ -443,11 +443,25 @@ const ROLE_WORDS: Record<string, string[]> = {
   menuitem: ["menu"],
 };
 
+const STOP_WORDS = new Set(["de", "da", "do", "das", "dos", "o", "a", "os", "as", "e", "em", "no", "na", "para", "com", "um", "uma", "the", "of", "to", "on", "in", "and"]);
+const ALL_ROLE_WORDS = new Set(Object.values(ROLE_WORDS).flat().filter((w) => !w.includes(" ")));
+
+/**
+ * Pontuação: o texto da busca, sem as palavras de tipo ("botão", "link"…), é
+ * comparado com o nome do elemento. Nome igual à frase > começa com ela >
+ * contém a frase > cobre todas as palavras > cobre parte. As palavras de tipo
+ * só desempatam: "botão mais resultados" acha o elemento "Mais resultados"
+ * mesmo que ele seja uma div clicável e haja vários botões "Mais informações".
+ */
 function find(query: string, limit = 20): string {
   pruneRefs();
   const q = norm(query.trim());
   if (!q) throw new Error("query vazia.");
-  const tokens = q.split(/\s+/).filter((t) => t.length > 1);
+  const words = q.split(/\s+/).filter((w) => w && !STOP_WORDS.has(w));
+  // Palavras de tipo saem do texto, a menos que a busca seja só isso ("botão").
+  const textWords = words.filter((w) => !ALL_ROLE_WORDS.has(w));
+  const tokens = (textWords.length ? textWords : words).filter((t) => t.length > 1);
+  const phrase = (textWords.length ? textWords : words).join(" ");
   const hits: { n: TreeNode; score: number }[] = [];
   const vw = innerWidth, vh = innerHeight;
 
@@ -459,14 +473,28 @@ function find(query: string, limit = 20): string {
     stopped: false,
     text: false,
     visit(n) {
-      const hay = norm(`${n.name} ${n.el.getAttribute("placeholder") ?? ""} ${n.el.getAttribute("href") ?? ""} ${n.el.id}`);
+      const name = norm(n.name).trim();
+      const hay = norm(`${n.name} ${n.el.getAttribute("placeholder") ?? ""} ${n.el.getAttribute("title") ?? ""} ${n.el.getAttribute("href") ?? ""} ${n.el.id}`);
       let score = 0;
-      if (n.name && norm(n.name).includes(q)) score += 10;
-      for (const t of tokens) if (hay.includes(t)) score += 2;
-      const words = ROLE_WORDS[n.role] ?? [n.role];
-      if (words.some((w) => q.includes(w))) score += 3;
+      if (phrase && name) {
+        if (name === phrase) score += 30;
+        else if (name.startsWith(phrase)) score += 20;
+        else if (name.includes(phrase)) score += 12;
+      }
+      const matched = tokens.filter((t) => hay.includes(t)).length;
+      if (tokens.length) {
+        if (matched === 0 && score === 0) {
+          // Sem texto em comum: só serve se a busca for apenas o tipo ("campo de busca" → searchbox).
+          if (textWords.length) return true;
+        }
+        score += matched === tokens.length ? 8 : 6 * (matched / tokens.length);
+      }
+      const roleWords = ROLE_WORDS[n.role] ?? [n.role];
+      if (roleWords.some((w) => q.includes(w))) score += 3;
       if (score === 0) return true;
       if (n.interactive) score += 1;
+      // Nomes enormes (cards inteiros clicáveis) contêm tudo; preferir o elemento mais específico.
+      if (name.length > 80) score -= 2;
       const r = n.el.getBoundingClientRect();
       if (r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw) score += 1;
       hits.push({ n, score });
@@ -483,18 +511,143 @@ function find(query: string, limit = 20): string {
     (st.timedOut ? "\n(busca parcial: tempo limite atingido)" : "");
 }
 
-function pageText(maxChars = 50_000): string {
-  const candidates = [document.querySelector("article"), document.querySelector("main"), document.body];
-  let text = "";
-  for (const c of candidates) {
-    if (!c) continue;
-    text = (c as HTMLElement).innerText ?? c.textContent ?? "";
-    if (text.trim().length > 500 || c === document.body) break;
+interface TextOptions {
+  max_chars?: number;
+  offset?: number;
+  ref_id?: string;
+}
+
+/** Visível para quem olha a tela (diferente de isHidden, ignora aria-hidden: o texto aparece). */
+function isVisibleBox(el: Element): boolean {
+  const anyEl = el as Element & { checkVisibility?: (o: object) => boolean };
+  if (anyEl.checkVisibility) return anyEl.checkVisibility({ checkVisibilityCSS: true }) || style(el).display === "contents";
+  const s = style(el);
+  return s.display !== "none" && s.visibility !== "hidden";
+}
+
+/** Imagem que transmite informação (logo da locadora, ícone de companhia aérea…), não decoração. */
+function imageLabel(el: Element): string {
+  const tag = el.tagName.toLowerCase();
+  const role = el.getAttribute("role");
+  let label = "";
+  if (tag === "img" || (tag === "input" && (el as HTMLInputElement).type === "image")) label = el.getAttribute("alt") || el.getAttribute("title") || "";
+  else if (tag === "svg" || role === "img") label = el.getAttribute("aria-label") || el.querySelector(":scope > title")?.textContent || "";
+  label = clean(label, 80);
+  if (!label) return "";
+  const r = el.getBoundingClientRect();
+  return r.width >= 12 || r.height >= 12 ? label : "";
+}
+
+/**
+ * Texto da página na ordem visual, como o innerText, mas incluindo o texto
+ * alternativo de imagens ("[img: Localiza]"), shadow DOM aberto e iframes de
+ * mesma origem. Campos de formulário ficam de fora (use read_page).
+ */
+function collectText(root: Element, deadline: number): string | null {
+  const out: string[] = [];
+  let timedOut = false;
+  const visit = (el: Element) => {
+    if (timedOut) return;
+    if (Date.now() > deadline) {
+      timedOut = true;
+      return;
+    }
+    const tag = el.tagName.toLowerCase();
+    const img = imageLabel(el);
+    if (img) {
+      out.push(` [img: ${img}] `);
+      return;
+    }
+    if (SKIP_TAGS.has(tag) || FORM_CONTROLS.has(tag) || tag === "option") return;
+    if (tag === "br") {
+      out.push("\n");
+      return;
+    }
+    if (!isVisibleBox(el)) return;
+    const s = style(el);
+    const d = s.display;
+    const block = !d.startsWith("inline") && d !== "contents" && d !== "table-cell";
+    const pre = s.whiteSpace.startsWith("pre");
+    if (block) out.push("\n");
+    if (el.shadowRoot || tag === "slot" || tag === "iframe" || tag === "frame") {
+      for (const c of childrenOf(el)) visit(c);
+    } else {
+      for (const n of Array.from(el.childNodes)) {
+        if (n.nodeType === 3) {
+          const t = n.textContent ?? "";
+          out.push(pre ? t : t.replace(/\s+/g, " "));
+        } else if (n.nodeType === 1) {
+          visit(n as Element);
+        }
+      }
+    }
+    if (d === "table-cell") out.push("\t");
+    else if (block) out.push("\n");
+  };
+  visit(root);
+  if (timedOut) return null;
+  return out.join("")
+    .replace(/[  ]*\t[ \t ]*/g, "\t")
+    .replace(/[  ]+/g, " ")
+    .replace(/ ?\n ?/g, "\n")
+    .replace(/\t+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function pageText(opts: TextOptions = {}): string {
+  const maxChars = Math.max(1000, opts.max_chars ?? 50_000);
+  const offset = Math.max(0, opts.offset ?? 0);
+  const deadline = Date.now() + 2500;
+  let root: Element;
+  let text: string | null = null;
+  if (opts.ref_id) {
+    root = getRef(opts.ref_id);
+    text = collectText(root, deadline);
+  } else {
+    // Prioriza <article>/<main> quando têm conteúdo de verdade.
+    root = document.body ?? document.documentElement;
+    for (const c of [document.querySelector("article"), document.querySelector("main")]) {
+      if (!c) continue;
+      const t = collectText(c, deadline);
+      if (t && t.length > 500) {
+        root = c;
+        text = t;
+        break;
+      }
+    }
+    text ??= collectText(root, deadline);
   }
-  text = text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  const cut = text.length > maxChars;
-  if (cut) text = text.slice(0, maxChars);
-  return `URL: ${location.href}\nTítulo: ${document.title}\n\n${text}${cut ? `\n\n(texto truncado em ${maxChars} caracteres)` : ""}`;
+  const fallback = text === null;
+  if (text === null) {
+    text = ((root as HTMLElement).innerText ?? root.textContent ?? "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  const total = text.length;
+  const slice = text.slice(offset, offset + maxChars);
+  const end = offset + slice.length;
+  const notes: string[] = [];
+  if (offset > 0 || end < total) notes.push(`(caracteres ${offset}–${end} de ${total}${end < total ? `; continue com offset=${end}` : ""})`);
+  if (fallback) notes.push("(página grande: texto simples, sem o texto das imagens)");
+  const scope = opts.ref_id ? `Escopo: ${opts.ref_id}\n` : "";
+  return `URL: ${location.href}\nTítulo: ${document.title}\n${scope}\n${slice}${notes.length ? "\n\n" + notes.join("\n") : ""}`;
+}
+
+/** Estado da página para wait_for: o texto (normalizado) aparece? */
+function hasText(query: string): boolean {
+  const q = norm(query).replace(/\s+/g, " ").trim();
+  if (!q) return false;
+  const body = document.body;
+  if (!body) return false;
+  const docs = [body.innerText];
+  for (const f of Array.from(document.querySelectorAll("iframe"))) {
+    try {
+      const t = (f as HTMLIFrameElement).contentDocument?.body?.innerText;
+      if (t) docs.push(t);
+    } catch {
+      /* outra origem */
+    }
+  }
+  return docs.some((t) => norm(t).replace(/\s+/g, " ").includes(q));
 }
 
 interface Point {
@@ -631,6 +784,6 @@ function markUpload(refId: string): { token: string; multiple: boolean; accept: 
   return { token, multiple: input.multiple, accept: input.accept };
 }
 
-(window as unknown as { __oba: unknown }).__oba = { readPage, find, pageText, resolveRef, viewport, formInput, markUpload };
+(window as unknown as { __oba: unknown }).__oba = { readPage, find, pageText, hasText, resolveRef, viewport, formInput, markUpload };
 
 export {};

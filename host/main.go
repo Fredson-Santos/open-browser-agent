@@ -40,9 +40,13 @@ func main() {
 	case "mcp":
 		fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 		browser := fs.String("browser", "", "navegador a controlar (brave, chrome, edge…); padrão: o mais recente")
+		session := fs.String("session", "", "chave da sessão: processos com a mesma chave reusam o mesmo grupo de abas; padrão: cliente + diretório atual (ou OBA_SESSION)")
 		fs.Parse(os.Args[2:])
 		if *browser != "" {
 			mcp.Browser = *browser
+		}
+		if *session != "" {
+			mcp.Session = *session
 		}
 		err = mcp.Run()
 	case "install":

@@ -38,7 +38,8 @@ const now = () => Date.now();
 
 function toolDefs(cfg: ChatConfig): ToolDef[] {
   return (catalog as { name: string; description: string; inputSchema: Record<string, unknown> }[])
-    .filter((t) => cfg.vision || t.name !== "screenshot")
+    // batch economiza idas e voltas de agentes MCP; no chat embutido só confunde modelos menores.
+    .filter((t) => (cfg.vision || t.name !== "screenshot") && t.name !== "batch")
     .map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
 }
 
@@ -183,7 +184,7 @@ export class Agent {
 
       const tools = toolDefs(cfg);
       for (let step = 0; ; step++) {
-        if (step >= cfg.maxSteps) {
+        if (cfg.maxSteps > 0 && step >= cfg.maxSteps) {
           this.push({ kind: "note", text: `Parei após ${cfg.maxSteps} passos. Envie "continue" para seguir.`, t: now() });
           break;
         }

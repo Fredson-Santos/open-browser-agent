@@ -22,7 +22,8 @@ var errNotConnected = errors.New(
 
 // hubClient mantém a conexão com o native host e roteia respostas por ID.
 type hubClient struct {
-	name string
+	name   string
+	resume bool // envia a chave de retomada (oba mcp sim; oba status não)
 
 	mu      sync.Mutex
 	conn    net.Conn
@@ -37,6 +38,19 @@ func newHubClient(name string) *hubClient {
 // Browser é a preferência de navegador (flag --browser ou OBA_BROWSER).
 // Vazio = o navegador cuja extensão conectou mais recentemente.
 var Browser = os.Getenv("OBA_BROWSER")
+
+// Session é a chave de retomada (flag --session ou OBA_SESSION). Vazio = nome
+// do cliente + diretório atual, que é o projeto do agente: reiniciar o agente
+// no mesmo projeto volta ao mesmo grupo de abas.
+var Session = os.Getenv("OBA_SESSION")
+
+func (h *hubClient) resumeKey() string {
+	if Session != "" {
+		return Session
+	}
+	dir, _ := os.Getwd()
+	return h.name + "|" + strings.ToLower(dir)
+}
 
 // dialHost conecta ao native host preferido, descartando registros obsoletos.
 func dialHost() (net.Conn, config.HostInfo, error) {
@@ -76,7 +90,11 @@ func (h *hubClient) connect() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(wire.ClientMsg{Type: "hello", Token: token, Client: h.name})
+	hello := wire.ClientMsg{Type: "hello", Token: token, Client: h.name}
+	if h.resume {
+		hello.Resume = h.resumeKey()
+	}
+	b, _ := json.Marshal(hello)
 	conn.Write(append(b, '\n'))
 
 	sc := bufio.NewScanner(conn)

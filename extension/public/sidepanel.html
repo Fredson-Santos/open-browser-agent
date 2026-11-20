@@ -25,6 +25,7 @@
       <symbol id="i-retry" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></symbol>
       <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
       <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.8 7L3 21l2-6.2A8 8 0 1 1 21 12z"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
       <symbol id="i-tab" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></symbol>
     </defs>
   </svg>
@@ -43,10 +44,23 @@
     <div class="messages" id="messages" aria-live="polite"></div>
 
     <form class="composer" id="composer">
+      <div class="model-menu" id="model-menu" role="dialog" aria-label="Escolher modelo" hidden>
+        <div class="model-search">
+          <svg><use href="#i-search"/></svg>
+          <input type="text" id="model-search" placeholder="Buscar modelo…" autocomplete="off" spellcheck="false"
+            role="combobox" aria-controls="model-options" aria-expanded="true" aria-autocomplete="list">
+          <button type="button" class="icon" id="model-refresh" title="Atualizar lista" aria-label="Atualizar lista"><svg><use href="#i-retry"/></svg></button>
+        </div>
+        <ul class="model-options" id="model-options" role="listbox" aria-label="Modelos"></ul>
+        <div class="model-foot">
+          <span class="model-provider" id="model-provider"></span>
+          <button type="button" class="text-btn" id="model-settings">Configurações</button>
+        </div>
+      </div>
       <div class="input-box">
         <textarea id="prompt" rows="1" placeholder="Peça algo para fazer nesta página…" aria-label="Mensagem"></textarea>
         <div class="input-tools">
-          <button type="button" class="chip" id="model-chip" title="Trocar modelo"></button>
+          <button type="button" class="chip" id="model-chip" title="Trocar modelo" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-menu"></button>
           <span class="tab-chip" id="chat-tab" title="O agente age na aba ativa desta janela"></span>
           <button type="submit" class="send" id="send" aria-label="Enviar"><svg><use href="#i-send"/></svg></button>
         </div>
@@ -92,14 +106,17 @@
 
       <div class="group">
         <h2>Modelo</h2>
-        <label class="field"><span>Nome do modelo</span>
-          <div class="with-action">
-            <input type="text" id="cfg-model" list="cfg-models" required spellcheck="false" placeholder="meta/llama-3.3-70b-instruct">
-            <button type="button" class="ghost" id="cfg-load">Listar</button>
+        <div class="field"><label for="cfg-model"><span>Nome do modelo</span></label>
+          <div class="picker">
+            <div class="with-action">
+              <input type="text" id="cfg-model" required spellcheck="false" autocomplete="off" placeholder="meta/llama-3.3-70b-instruct"
+                role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="cfg-models">
+              <button type="button" class="ghost" id="cfg-load" aria-haspopup="listbox">Listar</button>
+            </div>
+            <ul id="cfg-models" class="picker-list" role="listbox" aria-label="Modelos do provedor" hidden></ul>
           </div>
-          <datalist id="cfg-models"></datalist>
-          <small>Use um modelo com suporte a tool calling. "Listar" busca os disponíveis no provedor.</small>
-        </label>
+          <small>Use um modelo com suporte a tool calling. "Listar" busca os disponíveis no provedor; digite para filtrar.</small>
+        </div>
         <label class="switch">
           <input type="checkbox" id="cfg-vision">
           <span class="track" aria-hidden="true"></span>
@@ -107,7 +124,14 @@
             <small>Só para modelos com visão. Desligado, o agente lê a estrutura da página, que custa menos tokens.</small></span>
         </label>
         <label class="field"><span>Máximo de passos por pedido</span>
-          <input type="number" id="cfg-steps" min="1" max="100" step="1"></label>
+          <input type="number" id="cfg-steps" min="1" max="1000" step="1">
+          <small>Ao chegar no limite o agente para e espera você mandar "continue".</small></label>
+        <label class="switch">
+          <input type="checkbox" id="cfg-unlimited">
+          <span class="track" aria-hidden="true"></span>
+          <span class="label">Sem limite de passos
+            <small>O agente segue até terminar a tarefa. Use Parar para interromper; tarefas longas gastam mais tokens.</small></span>
+        </label>
       </div>
 
       <div class="status-line" id="cfg-msg" role="status"></div>

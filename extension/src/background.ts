@@ -190,6 +190,8 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   })();
 });
 
+chrome.tabGroups.onRemoved.addListener((g) => void sessions.groupRemoved(g.id));
+
 chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
 chrome.alarms.create("oba-reconnect", { periodInMinutes: 0.5 });
